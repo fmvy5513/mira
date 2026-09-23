@@ -1,29 +1,36 @@
 import { deleteJson, fetchJson, patchJson, postJson, putJson } from "./http"
 import type { LearnedRuleModel, OrgLearnedRuleModel, RuleModel } from "./types"
 
+const repoQuery = (owner: string, repo: string) =>
+  `?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`
+
 // Custom rules (global + per-repo) and learned rules.
 export const rulesApi = {
   // Learned rules. status: "approved" | "pending" | "rejected" | "" (all)
   listLearnedRules: (status = "") =>
     fetchJson<OrgLearnedRuleModel[]>(
-      status ? `/api/learned-rules?status=${encodeURIComponent(status)}` : `/api/learned-rules`
+      status
+        ? `/api/learned-rules?status=${encodeURIComponent(status)}`
+        : `/api/learned-rules`
     ),
 
   listRepoLearnedRules: (owner: string, repo: string) =>
     fetchJson<LearnedRuleModel[]>(`/api/repos/${owner}/${repo}/learned-rules`),
 
   getLearnedRule: (owner: string, repo: string, id: number) =>
-    fetchJson<OrgLearnedRuleModel>(`/api/learned-rules/${owner}/${repo}/${id}`),
+    fetchJson<OrgLearnedRuleModel>(
+      `/api/learned-rules/${id}${repoQuery(owner, repo)}`
+    ),
 
   approveLearnedRule: (owner: string, repo: string, id: number) =>
     postJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/approve`,
+      `/api/learned-rules/${id}/approve${repoQuery(owner, repo)}`,
       {}
     ),
 
   rejectLearnedRule: (owner: string, repo: string, id: number) =>
     postJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/reject`,
+      `/api/learned-rules/${id}/reject${repoQuery(owner, repo)}`,
       {}
     ),
 
@@ -34,7 +41,7 @@ export const rulesApi = {
     active: boolean
   ) =>
     patchJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/active`,
+      `/api/learned-rules/${id}/active${repoQuery(owner, repo)}`,
       { active }
     ),
 
@@ -42,7 +49,11 @@ export const rulesApi = {
     owner: string,
     repo: string,
     body: { rule_text: string; category: string; path_pattern?: string }
-  ) => postJson<LearnedRuleModel>(`/api/learned-rules/${owner}/${repo}`, body),
+  ) =>
+    postJson<LearnedRuleModel>(
+      `/api/learned-rules${repoQuery(owner, repo)}`,
+      body
+    ),
 
   updateLearnedRule: (
     owner: string,
@@ -50,10 +61,13 @@ export const rulesApi = {
     id: number,
     body: { rule_text: string; category: string; path_pattern?: string }
   ) =>
-    putJson<{ ok: boolean }>(`/api/learned-rules/${owner}/${repo}/${id}`, body),
+    putJson<{ ok: boolean }>(
+      `/api/learned-rules/${id}${repoQuery(owner, repo)}`,
+      body
+    ),
 
   deleteLearnedRule: (owner: string, repo: string, id: number) =>
-    deleteJson(`/api/learned-rules/${owner}/${repo}/${id}`),
+    deleteJson(`/api/learned-rules/${id}${repoQuery(owner, repo)}`),
 
   // Global rules
   listGlobalRules: () => fetchJson<RuleModel[]>("/api/rules/global"),
