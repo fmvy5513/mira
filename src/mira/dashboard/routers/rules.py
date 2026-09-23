@@ -146,6 +146,10 @@ def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearne
 
 
 @router.get(
+    "/api/learned-rules/{rule_id}",
+    response_model=OrgLearnedRuleModel,
+)
+@router.get(
     "/api/learned-rules/{owner}/{repo}/{rule_id}",
     response_model=OrgLearnedRuleModel,
 )
@@ -181,6 +185,7 @@ def get_learned_rule_detail(
     )
 
 
+@router.post("/api/learned-rules/{rule_id}/approve")
 @router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/approve")
 def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
@@ -189,6 +194,7 @@ def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) 
     return {"ok": True}
 
 
+@router.post("/api/learned-rules/{rule_id}/reject")
 @router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/reject")
 def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
@@ -197,6 +203,7 @@ def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -
     return {"ok": True}
 
 
+@router.patch("/api/learned-rules/{rule_id}/active")
 @router.patch("/api/learned-rules/{owner}/{repo}/{rule_id}/active")
 def set_learned_rule_active(
     owner: str, repo: str, rule_id: int, body: LearnedRuleActiveInput, request: Request
@@ -207,6 +214,7 @@ def set_learned_rule_active(
     return {"ok": True}
 
 
+@router.post("/api/learned-rules", response_model=LearnedRuleModel)
 @router.post("/api/learned-rules/{owner}/{repo}", response_model=LearnedRuleModel)
 def create_learned_rule(
     owner: str, repo: str, body: LearnedRuleInput, request: Request
@@ -239,6 +247,7 @@ def create_learned_rule(
     )
 
 
+@router.put("/api/learned-rules/{rule_id}")
 @router.put("/api/learned-rules/{owner}/{repo}/{rule_id}")
 def update_learned_rule(
     owner: str, repo: str, rule_id: int, body: LearnedRuleInput, request: Request
@@ -260,6 +269,7 @@ def update_learned_rule(
     return {"ok": True}
 
 
+@router.delete("/api/learned-rules/{rule_id}")
 @router.delete("/api/learned-rules/{owner}/{repo}/{rule_id}")
 def delete_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
