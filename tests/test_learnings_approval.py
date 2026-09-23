@@ -6,7 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase, User
@@ -57,6 +58,33 @@ def test_approve_makes_rule_active(patched_db: AppDatabase):
     store = IndexStore.open("acme", "web")
     active = store.list_active_learned_rules()
     assert [r.id for r in active] == [rule.id]
+    store.close()
+
+
+def test_approve_route_accepts_gitlab_owner_with_slash(patched_db: AppDatabase):
+    owner = "_gitlab/rhet"
+    repo = "rhet-portal-cms"
+    patched_db.register_repo(owner, repo)
+    store = IndexStore.open(owner, repo)
+    rule = store.upsert_learned_rule("r", "reject_pattern", "style", "", 3)
+    store.close()
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def authenticate(request: Request, call_next):  # noqa: ANN001
+        request.state.user = User(id=1, username="admin", is_admin=True)
+        return await call_next(request)
+
+    app.include_router(api.router)
+    response = TestClient(app).post(
+        f"/api/learned-rules/{rule.id}/approve",
+        params={"owner": owner, "repo": repo},
+    )
+
+    assert response.status_code == 200
+    store = IndexStore.open(owner, repo)
+    assert [r.id for r in store.list_active_learned_rules()] == [rule.id]
     store.close()
 
 
