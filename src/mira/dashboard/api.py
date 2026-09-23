@@ -62,6 +62,17 @@ def _get_index_dir() -> str:
 _PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2}
 
 
+def _decode_storage_owner(owner: str) -> tuple[str, str | None]:
+    """Translate a non-GitHub index owner key back to its registry identity."""
+    for platform in _PLATFORM_ORDER:
+        if platform == "github":
+            continue
+        prefix = f"_{platform}/"
+        if owner.startswith(prefix):
+            return owner[len(prefix) :], platform
+    return owner, None
+
+
 def _pick_platform_record(records: list) -> object:
     """Return the highest-priority record from a cross-platform list."""
     return min(records, key=lambda r: _PLATFORM_ORDER.get(r.platform, 99))
@@ -74,12 +85,18 @@ def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
     The dashboard routes are keyed by (owner, repo) only, so resolve the
     platform from the registry with a single cross-platform lookup.
     """
-    repo_records = _app_db.get_repo_any_platform(owner, repo)
-    if not repo_records:
-        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
-    repo_record = _pick_platform_record(repo_records)
+    registry_owner, encoded_platform = _decode_storage_owner(owner)
+    if encoded_platform:
+        repo_record = _app_db.get_repo(registry_owner, repo, platform=encoded_platform)
+        if not repo_record:
+            raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    else:
+        repo_records = _app_db.get_repo_any_platform(registry_owner, repo)
+        if not repo_records:
+            raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+        repo_record = _pick_platform_record(repo_records)
 
-    store = IndexStore.open(owner, repo, platform=repo_record.platform)
+    store = IndexStore.open(registry_owner, repo, platform=repo_record.platform)
     try:
         yield store
     finally:
