@@ -62,10 +62,11 @@ def test_approve_makes_rule_active(patched_db: AppDatabase):
 
 
 def test_approve_route_accepts_gitlab_owner_with_slash(patched_db: AppDatabase):
-    owner = "_gitlab/rhet"
+    owner = "rhet"
+    storage_owner = "_gitlab/rhet"
     repo = "rhet-portal-cms"
-    patched_db.register_repo(owner, repo)
-    store = IndexStore.open(owner, repo)
+    patched_db.register_repo(owner, repo, platform="gitlab")
+    store = IndexStore.open(owner, repo, platform="gitlab")
     rule = store.upsert_learned_rule("r", "reject_pattern", "style", "", 3)
     store.close()
 
@@ -79,11 +80,11 @@ def test_approve_route_accepts_gitlab_owner_with_slash(patched_db: AppDatabase):
     app.include_router(api.router)
     response = TestClient(app).post(
         f"/api/learned-rules/{rule.id}/approve",
-        params={"owner": owner, "repo": repo},
+        params={"owner": storage_owner, "repo": repo},
     )
 
     assert response.status_code == 200
-    store = IndexStore.open(owner, repo)
+    store = IndexStore.open(owner, repo, platform="gitlab")
     assert [r.id for r in store.list_active_learned_rules()] == [rule.id]
     store.close()
 
