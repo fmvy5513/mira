@@ -4,6 +4,13 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Breaking: command authorization is now writer-only by default.** Comment commands (`review`, `review-rest`, `help`, `pause`, `resume`, `reject`, and free-form questions) on GitHub, GitLab, and Forgejo are denied to users without write access to the repository. Permission lookup failures also deny access (fail closed). Previously any commenter could run them. To keep access for read-only users, add them to `commands.allowed_users` (or a per-command `commands.<name>.allowed_users`); `commands.blocked_users` always wins. See `.mira.yaml.example`. This is a high-risk change that warrants a non-author maintainer review and a minor version bump during 0.x.
+- **Free-form thread disagreements now honour the `reject` policy.** A reply that the model classifies as disagreement resolves the thread and records rejected feedback only if the author is allowed to `reject`; the reply itself is still governed by `ask`.
+
 ## [0.9.1] — 2026-09-23
 
 ### Added

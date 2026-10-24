@@ -368,7 +368,17 @@ async def run_thread_reply(
         logger.warning("Failed to post thread reply: %s", exc)
         return
 
-    if intent == "disagreement":
+    # A free-form disagreement is an implicit ``reject``: resolving the thread
+    # and recording feedback must honour the reject policy, not just ``ask``.
+    if intent == "disagreement" and await is_command_allowed(
+        config,
+        "reject",
+        actor,
+        provider=provider,
+        owner=pr_info.owner,
+        repo=pr_info.repo,
+        user_id=user_id,
+    ):
         try:
             tid = thread_id
             if tid is None and comment_node_id:
