@@ -17,6 +17,7 @@ import httpx
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
 from mira.llm.base import OpenAICompatibleProvider, _strip_model_prefix
+from mira.llm.utils import _ensure_json_hint
 
 logger = logging.getLogger(__name__)
 
@@ -80,23 +81,6 @@ def _responses_input(messages: list[dict]) -> list[dict]:
             )
             continue
 
-    return items
-
-
-# Codex-class Responses API backends reject ``text.format`` of
-# ``json_object`` unless the input contains the word "json" in some
-# form. When the caller's prompt never mentions JSON, prepend a minimal
-# system hint so the request passes the backend's validation.
-_JSON_HINT = "Respond with a JSON object only. No markdown fences, no prose."
-
-
-def _ensure_json_word(items: list[dict]) -> list[dict]:
-    """Prepend ``_JSON_HINT`` if no input item mentions "json" (case-insensitive)."""
-    for item in items:
-        for value in item.values():
-            if isinstance(value, str) and "json" in value.lower():
-                return items
-    items.insert(0, {"role": "system", "content": _JSON_HINT})
     return items
 
 
@@ -216,7 +200,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
         }
         if json_mode:
             body["text"] = {"format": {"type": "json_object"}}
-            body["input"] = _ensure_json_word(body["input"])
+            body["input"] = _ensure_json_hint(body["input"])
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
@@ -300,7 +284,20 @@ class ResponsesProvider(OpenAICompatibleProvider):
             logger.warning("Model returned content instead of tool call, using content as fallback")
             return text
 
-        raise LLMError("no_tool_call")
+        # Neither a function call nor text. Carry the response shape on the
+        # error's full message — counts only, never reasoning text.
+        usage = data.get("usage") or {}
+        output_details = usage.get("output_tokens_details") or {}
+        detail = (
+            f"status={resp.status_code} "
+            f"response_status={data.get('status')} "
+            f"incomplete={(data.get('incomplete_details') or {}).get('reason')} "
+            f"output_items={[item.get('type') for item in output]} "
+            f"input_tokens={usage.get('input_tokens')} "
+            f"output_tokens={usage.get('output_tokens')} "
+            f"reasoning_tokens={output_details.get('reasoning_tokens')}"
+        )
+        raise LLMError("no_tool_call", detail=detail)
 
     async def _call_llm_agentic(
         self,

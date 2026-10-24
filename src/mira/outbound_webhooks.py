@@ -274,7 +274,7 @@ async def deliver_one(
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
                 resp = await client.post(url, json=payload)
-            if resp.status_code < 400:
+            if 200 <= resp.status_code < 300:
                 return True, f"HTTP {resp.status_code}"
             last_detail = f"HTTP {resp.status_code}"
             if resp.status_code < 500:

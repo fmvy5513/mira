@@ -4,6 +4,33 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Breaking: command authorization is now writer-only by default.** Comment commands (`review`, `review-rest`, `help`, `pause`, `resume`, `reject`, and free-form questions) on GitHub, GitLab, and Forgejo are denied to users without write access to the repository. Permission lookup failures also deny access (fail closed). Previously any commenter could run them. To keep access for read-only users, add them to `commands.allowed_users` (or a per-command `commands.<name>.allowed_users`); `commands.blocked_users` always wins. See `.mira.yaml.example`. This is a high-risk change that warrants a non-author maintainer review and a minor version bump during 0.x.
+- **Free-form thread disagreements now honour the `reject` policy.** A reply that the model classifies as disagreement resolves the thread and records rejected feedback only if the author is allowed to `reject`; the reply itself is still governed by `ask`.
+
+## [0.9.1] — 2026-09-23
+
+### Added
+
+- **Layered security review.** A dedicated security-model tier combines a focused LLM pass, optional agentic `read_file`/`grep_repo` verification, a deterministic regex-and-entropy secrets scan, and review-time OSV checks for dependencies added or upgraded by a PR.
+- **OpenAI Responses API support.** OpenAI-compatible providers can set `llm.api_style: responses` to use the `/responses` protocol instead of Chat Completions, including JSON output, tool calling, reasoning, fallback models, and usage accounting.
+- **Broader indexing support.** A shared file-type registry keeps review and indexing language detection consistent and adds Lua to the indexed languages.
+- **Agentic tools on indexed repositories.** The main reviewer can use `read_file` and `grep_repo` even when an index already exists, allowing it to verify callers and dispatch paths beyond pre-fetched context.
+
+### Fixed
+
+- **Very large GitHub PRs remain reviewable.** When GitHub rejects the complete diff with HTTP 406, Mira reconstructs a unified diff from per-file patches, including valid added, removed, and renamed-file headers.
+- **Walkthrough parsing tolerates malformed model output**, including leaked tool-call XML, malformed optional fields, and incomplete JSON structures.
+- **Review failures update the in-progress placeholder comment** instead of leaving a PR appearing permanently stuck.
+- **Repository indexes remain platform-isolated** when the same owner/repository name exists on more than one provider.
+- **Incremental indexing reports the stored repository total** rather than only the number of files processed in the latest update.
+- **Large repository tarballs avoid out-of-memory extraction** by discarding non-indexable and oversized files before loading their contents.
+- **Contributor backfill uses PyGithub's current rate-limit API.**
+- **Responses JSON mode includes the required object-output hint**, preventing compatible endpoints from rejecting walkthrough and review requests.
+
 ## [0.8.0] — 2026-07-27
 
 ### Added
@@ -298,6 +325,7 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.9.1]: https://github.com/miracodeai/mira/releases/tag/v0.9.1
 [0.6.0]: https://github.com/miracodeai/mira/releases/tag/v0.6.0
 [0.5.1]: https://github.com/miracodeai/mira/releases/tag/v0.5.1
 [0.5.0]: https://github.com/miracodeai/mira/releases/tag/v0.5.0

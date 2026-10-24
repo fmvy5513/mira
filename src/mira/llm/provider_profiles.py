@@ -31,6 +31,9 @@ DEFAULT_PROFILE: dict = {
     "model_prefix": "strip",
     "extra_headers": {},
     "reasoning_effort_map": {},
+    # Sent when reasoning is off, for endpoints that think by default and need
+    # an explicit disable (DeepSeek). Empty for everyone else — no-op.
+    "reasoning_off_payload": {},
     "api_key_env": None,
 }
 

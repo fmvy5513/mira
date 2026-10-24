@@ -131,6 +131,36 @@ class TestRender:
 
 
 class TestDeliverOne:
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    async def test_redirect_is_not_delivered(self, status):
+        requests = []
+
+        def respond(request):
+            requests.append(str(request.url))
+            return httpx.Response(status, headers={"Location": "https://receiver.example/final"})
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(respond)
+        with patch(
+            "mira.outbound_webhooks.httpx.AsyncClient",
+            side_effect=lambda **kwargs: client_type(transport=transport, **kwargs),
+        ):
+            result = await nf.deliver_one(
+                {"url": "https://receiver.example/hook"}, nf.REVIEW_COMPLETED, {}
+            )
+        assert result == (False, f"HTTP {status}")
+        assert requests == ["https://receiver.example/hook"]
+
+    @pytest.mark.parametrize("status", [201, 202, 204])
+    async def test_success_statuses_are_delivered(self, status):
+        factory, client = _mock_httpx(status=status)
+        with patch("mira.outbound_webhooks.httpx.AsyncClient", factory):
+            result = await nf.deliver_one(
+                {"url": "https://receiver.example/hook"}, nf.REVIEW_COMPLETED, {}
+            )
+        assert result == (True, f"HTTP {status}")
+        assert client.post.call_count == 1
+
     async def test_success(self):
         factory, client = _mock_httpx(status=200)
         with patch("mira.outbound_webhooks.httpx.AsyncClient", factory):

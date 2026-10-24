@@ -24,6 +24,13 @@ class TestResolve:
         assert p["model_prefix"] == "strip"
         assert p["extra_headers"] == {}
         assert p["reasoning_effort_map"] == {}
+        assert p["reasoning_off_payload"] == {}
+
+    def test_deepseek_profile_disables_thinking_when_off(self):
+        p = profiles.resolve("https://api.deepseek.com/v1")
+        assert p["name"] == "deepseek"
+        assert p["model_prefix"] == "strip"
+        assert p["reasoning_off_payload"] == {"thinking": {"type": "disabled"}}
 
     def test_sparse_profile_fills_from_default(self, tmp_path, monkeypatch):
         # A profile with only base_url + api_key_env still resolves with every

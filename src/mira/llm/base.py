@@ -182,10 +182,15 @@ class OpenAICompatibleProvider:
         The effort is passed via the unified ``reasoning.effort`` knob, after
         any per-provider remap from the profile. Anthropic models reject a
         custom ``temperature`` while thinking is on, so we drop it.
-        No-op when reasoning is off, keeping the request unchanged.
+        When reasoning is off, endpoints that think by default (DeepSeek) get
+        the profile's explicit disable payload instead of an omission; every
+        other endpoint stays a no-op.
         """
         effort = self.config.reasoning_effort
         if not effort or effort == "off":
+            off_payload = self.profile.get("reasoning_off_payload")
+            if off_payload:
+                body.update(off_payload)
             return
         if body.get("model") in self._no_reasoning:
             return

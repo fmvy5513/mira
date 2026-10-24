@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm.provider import LLMProvider
+from mira.llm.utils import _JSON_HINT
 
 # Set a dummy API key for tests so _get_api_key() doesn't fail
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key-for-unit-tests")
@@ -118,6 +121,77 @@ class TestComplete:
             assert body["response_format"] == {"type": "json_object"}
 
     @pytest.mark.asyncio
+    async def test_json_mode_injects_hint_into_user_content(self):
+        config = LLMConfig(model="test-model")
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response(_make_response_json("{}"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+            call_kwargs = mock_client.post.call_args
+            body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            user = body["messages"][-1]
+            assert user["role"] == "user"
+            assert user["content"].startswith("hi")
+            assert _JSON_HINT in user["content"]
+
+    @pytest.mark.asyncio
+    async def test_json_mode_does_not_mutate_caller_messages(self):
+        config = LLMConfig(model="test-model")
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response(_make_response_json("{}"))
+        messages = [
+            {"role": "system", "content": "Respond in JSON."},
+            {"role": "user", "content": "hi"},
+        ]
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete(messages, json_mode=True)
+
+        assert messages == [
+            {"role": "system", "content": "Respond in JSON."},
+            {"role": "user", "content": "hi"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_json_mode_system_only_json_gets_separate_user_hint(self):
+        config = LLMConfig(model="test-model")
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response(_make_response_json("{}"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete(
+                [{"role": "system", "content": "Respond in JSON."}], json_mode=True
+            )
+
+            call_kwargs = mock_client.post.call_args
+            body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            assert body["messages"][0] == {"role": "system", "content": "Respond in JSON."}
+            assert body["messages"][-1] == {"role": "user", "content": _JSON_HINT}
+
+    @pytest.mark.asyncio
     async def test_non_json_mode_no_response_format(self):
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
@@ -136,6 +210,7 @@ class TestComplete:
             call_kwargs = mock_client.post.call_args
             body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
             assert "response_format" not in body
+            assert body["messages"] == [{"role": "user", "content": "hi"}]
 
     @pytest.mark.asyncio
     async def test_reasoning_effort_sets_reasoning_and_drops_temperature(self):
@@ -645,3 +720,142 @@ class TestReasoningFallback:
 
         assert len(posts) == 1  # no wasted reasoning attempt
         assert "reasoning" not in posts[0].kwargs["json"]
+
+
+class TestReasoningOffPayload:
+    """``off`` must actively disable thinking on endpoints that think by
+    default (DeepSeek), not merely omit the field."""
+
+    _TOOL = {"type": "function", "function": {"name": "submit_review", "parameters": {}}}
+
+    def _client(self, responses):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_deepseek_off_sends_explicit_disable(self):
+        provider = LLMProvider(
+            LLMConfig(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            sent = cls.return_value.post.call_args_list[0].kwargs["json"]
+
+        assert sent["thinking"] == {"type": "disabled"}
+
+    @pytest.mark.asyncio
+    async def test_other_endpoint_off_omits_thinking(self):
+        provider = LLMProvider(LLMConfig(model="some/model"))  # default base_url
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            sent = cls.return_value.post.call_args_list[0].kwargs["json"]
+
+        assert "thinking" not in sent
+
+    @pytest.mark.asyncio
+    async def test_reasoning_level_still_sends_effort(self):
+        provider = LLMProvider(
+            LLMConfig(
+                model="deepseek-v4-pro",
+                base_url="https://api.deepseek.com/v1",
+                reasoning_effort="high",
+            )
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            sent = cls.return_value.post.call_args_list[0].kwargs["json"]
+
+        assert sent["reasoning"] == {"effort": "high"}
+        assert "thinking" not in sent
+
+
+class TestResponseDiagnostics:
+    """``no_tool_call`` must carry the response shape on the error, not discard
+    it — counts only, never reasoning text."""
+
+    _TOOL = {"type": "function", "function": {"name": "submit_review", "parameters": {}}}
+
+    def _client(self, responses):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_empty_response_reports_finish_reason_and_usage(self):
+        # max_retries=1: no_tool_call is retriable, so keep the test to one call.
+        provider = LLMProvider(LLMConfig(model="m", max_retries=1))
+        empty = _mock_httpx_response(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "x" * 50,
+                            "tool_calls": None,
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 65536,
+                    "completion_tokens_details": {"reasoning_tokens": 65530},
+                },
+            }
+        )
+
+        with (
+            patch("mira.llm.provider.httpx.AsyncClient") as cls,
+            pytest.raises(LLMError) as excinfo,
+        ):
+            cls.return_value = self._client([empty])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+
+        message = str(excinfo.value)
+        assert "finish_reason=length" in message
+        assert "reasoning_len=50" in message
+        assert "reasoning_tokens=65530" in message
+        assert "x" * 50 not in message  # reasoning text never appears
+
+    @pytest.mark.asyncio
+    async def test_transport_error_is_logged_and_propagated(self, caplog):
+        provider = LLMProvider(LLMConfig(model="m", max_retries=1))
+        client = AsyncMock()
+        client.post = AsyncMock(side_effect=httpx.ReadError("connection dropped"))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="mira.llm.provider"),
+            patch("mira.llm.provider.httpx.AsyncClient", return_value=client),
+            pytest.raises(LLMError),
+        ):
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+
+        log = "\n".join(r.getMessage() for r in caplog.records)
+        assert "transport error" in log
+        assert "ReadError" in log
