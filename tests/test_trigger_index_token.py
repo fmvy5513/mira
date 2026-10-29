@@ -106,4 +106,5 @@ async def test_no_installations_reports_credentials_hint(
 ) -> None:
     token, err = await repos._resolve_github_token("o/r", [])
     assert token == ""
+    # With zero installations the error should point at the App credentials.
     assert "MIRA_GITHUB_APP_ID" in err
