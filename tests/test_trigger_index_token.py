@@ -74,6 +74,7 @@ async def test_stored_installation_is_used_without_scanning(
     record = app_db.register_repo("o", "r", installation_id=42)
     token, err = await repos._resolve_github_token("o/r", [record])
     assert (token, err) == ("tok-42", "")
+    # The fast path must not list installations or their repositories.
     assert fake_auth.calls == ["token:42"]
 
 
