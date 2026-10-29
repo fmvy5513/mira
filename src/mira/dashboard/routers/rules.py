@@ -22,7 +22,7 @@ from mira.dashboard.api import (
 )
 
 
-@router.get("/api/repos/{owner}/{repo}/context", response_model=list[ReviewContextModel])
+@router.get("/api/repos/{owner:path}/{repo}/context", response_model=list[ReviewContextModel])
 def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
     with _open_store(owner, repo) as store:
         entries = store.list_review_context()
@@ -38,7 +38,7 @@ def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
         ]
 
 
-@router.post("/api/repos/{owner}/{repo}/context", response_model=ReviewContextModel)
+@router.post("/api/repos/{owner:path}/{repo}/context", response_model=ReviewContextModel)
 def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewContextModel:
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
@@ -51,7 +51,9 @@ def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewCo
         )
 
 
-@router.put("/api/repos/{owner}/{repo}/context/{context_id}", response_model=ReviewContextModel)
+@router.put(
+    "/api/repos/{owner:path}/{repo}/context/{context_id}", response_model=ReviewContextModel
+)
 def update_context(
     owner: str, repo: str, context_id: int, body: ReviewContextCreate
 ) -> ReviewContextModel:
@@ -71,7 +73,7 @@ def update_context(
         )
 
 
-@router.delete("/api/repos/{owner}/{repo}/context/{context_id}")
+@router.delete("/api/repos/{owner:path}/{repo}/context/{context_id}")
 def delete_context(owner: str, repo: str, context_id: int) -> dict:
     with _open_store(owner, repo) as store:
         store.delete_review_context(context_id)
@@ -79,7 +81,7 @@ def delete_context(owner: str, repo: str, context_id: int) -> dict:
 
 
 @router.get(
-    "/api/repos/{owner}/{repo}/learned-rules",
+    "/api/repos/{owner:path}/{repo}/learned-rules",
     response_model=list[LearnedRuleModel],
 )
 def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
@@ -150,7 +152,7 @@ def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearne
     response_model=OrgLearnedRuleModel,
 )
 @router.get(
-    "/api/learned-rules/{owner}/{repo}/{rule_id}",
+    "/api/learned-rules/{owner:path}/{repo}/{rule_id}",
     response_model=OrgLearnedRuleModel,
 )
 def get_learned_rule_detail(
@@ -186,7 +188,7 @@ def get_learned_rule_detail(
 
 
 @router.post("/api/learned-rules/{rule_id}/approve")
-@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/approve")
+@router.post("/api/learned-rules/{owner:path}/{repo}/{rule_id}/approve")
 def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
     with _open_store(owner, repo) as store:
@@ -195,7 +197,7 @@ def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) 
 
 
 @router.post("/api/learned-rules/{rule_id}/reject")
-@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/reject")
+@router.post("/api/learned-rules/{owner:path}/{repo}/{rule_id}/reject")
 def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
     with _open_store(owner, repo) as store:
@@ -204,7 +206,7 @@ def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -
 
 
 @router.patch("/api/learned-rules/{rule_id}/active")
-@router.patch("/api/learned-rules/{owner}/{repo}/{rule_id}/active")
+@router.patch("/api/learned-rules/{owner:path}/{repo}/{rule_id}/active")
 def set_learned_rule_active(
     owner: str, repo: str, rule_id: int, body: LearnedRuleActiveInput, request: Request
 ) -> dict:
@@ -215,7 +217,7 @@ def set_learned_rule_active(
 
 
 @router.post("/api/learned-rules", response_model=LearnedRuleModel)
-@router.post("/api/learned-rules/{owner}/{repo}", response_model=LearnedRuleModel)
+@router.post("/api/learned-rules/{owner:path}/{repo}", response_model=LearnedRuleModel)
 def create_learned_rule(
     owner: str, repo: str, body: LearnedRuleInput, request: Request
 ) -> LearnedRuleModel:
@@ -248,7 +250,7 @@ def create_learned_rule(
 
 
 @router.put("/api/learned-rules/{rule_id}")
-@router.put("/api/learned-rules/{owner}/{repo}/{rule_id}")
+@router.put("/api/learned-rules/{owner:path}/{repo}/{rule_id}")
 def update_learned_rule(
     owner: str, repo: str, rule_id: int, body: LearnedRuleInput, request: Request
 ) -> dict:
@@ -270,7 +272,7 @@ def update_learned_rule(
 
 
 @router.delete("/api/learned-rules/{rule_id}")
-@router.delete("/api/learned-rules/{owner}/{repo}/{rule_id}")
+@router.delete("/api/learned-rules/{owner:path}/{repo}/{rule_id}")
 def delete_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)
     with _open_store(owner, repo) as store:
@@ -278,7 +280,7 @@ def delete_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -
     return {"ok": True}
 
 
-@router.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])
+@router.get("/api/repos/{owner:path}/{repo}/rules", response_model=list[RuleModel])
 def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
     with _open_store(owner, repo) as store:
         entries = store.list_review_context()
@@ -295,7 +297,7 @@ def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
         ]
 
 
-@router.post("/api/repos/{owner}/{repo}/rules", response_model=RuleModel)
+@router.post("/api/repos/{owner:path}/{repo}/rules", response_model=RuleModel)
 def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
@@ -309,7 +311,7 @@ def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
         )
 
 
-@router.put("/api/repos/{owner}/{repo}/rules/{rule_id}", response_model=RuleModel)
+@router.put("/api/repos/{owner:path}/{repo}/rules/{rule_id}", response_model=RuleModel)
 def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> RuleModel:
     with _open_store(owner, repo) as store:
         existing = store.get_review_context(rule_id)
@@ -326,7 +328,7 @@ def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> R
         )
 
 
-@router.delete("/api/repos/{owner}/{repo}/rules/{rule_id}")
+@router.delete("/api/repos/{owner:path}/{repo}/rules/{rule_id}")
 def delete_repo_rule(owner: str, repo: str, rule_id: int) -> dict:
     with _open_store(owner, repo) as store:
         store.delete_review_context(rule_id)

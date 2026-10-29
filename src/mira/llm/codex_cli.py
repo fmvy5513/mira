@@ -113,6 +113,8 @@ class CodexCLIProvider:
             "-c",
             'shell_environment_policy.inherit="none"',
         ]
+        if self.config.reasoning_effort and self.config.reasoning_effort != "off":
+            cmd.extend(["-c", f'model_reasoning_effort="{self.config.reasoning_effort}"'])
         if self.config.model not in {"", "default", "codex-default"}:
             cmd.extend(["-m", self.config.model])
         cmd.append("-")
@@ -307,13 +309,13 @@ class CodexCLIProvider:
         return {"content": "", "tool_calls": []}
 
     async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
-        from mira.llm.provider import SUBMIT_REVIEW_TOOL
+        from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL
 
         return await self.complete_with_tools(
             messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
         )
 
     async def walkthrough(self, messages: list[dict[str, str]]) -> str:
-        from mira.llm.provider import SUBMIT_WALKTHROUGH_TOOL
+        from mira.llm.tool_schemas import SUBMIT_WALKTHROUGH_TOOL
 
         return await self.complete_with_tools(messages, tools=[SUBMIT_WALKTHROUGH_TOOL])
