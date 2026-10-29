@@ -31,7 +31,7 @@ from mira.models import (
     UnresolvedThread,
 )
 from mira.platforms import profiles
-from mira.providers.base import BaseProvider
+from mira.providers.base import CHECK_RUN_NAME, BaseProvider, CheckConclusion
 from mira.providers.formatting import format_comment_body, format_key_issues
 
 logger = logging.getLogger(__name__)
@@ -362,6 +362,71 @@ class ForgejoProvider(BaseProvider):
             "POST",
             f"{self._repo(pr_info)}/issues/{pr_info.number}/comments",
             json={"body": body},
+        )
+
+    # Forgejo has no Checks API, so the commit-status model stands in for it:
+    # posting with the same context on the same SHA replaces the state, so one
+    # fixed context (``Mira``) renders a single row that transitions
+    # pending → success/failure, with the icon following the terminal state.
+    # ``start_check_run`` returns ``0`` as a "posted" sentinel —
+    # ``finish_check_run`` only skips when it gets ``None``.
+
+    async def start_check_run(
+        self,
+        pr_info: PRInfo,
+        *,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int | None:
+        """Post a ``pending`` commit status for the PR head commit."""
+        if not pr_info.head_sha:
+            return None
+        payload: dict[str, str] = {
+            "state": "pending",
+            "context": CHECK_RUN_NAME,
+            "description": summary or title,
+        }
+        if details_url:
+            payload["target_url"] = details_url
+        await self._request(
+            "POST",
+            f"{self._repo(pr_info)}/statuses/{quote(pr_info.head_sha, safe='')}",
+            json=payload,
+        )
+        return 0
+
+    async def finish_check_run(
+        self,
+        pr_info: PRInfo,
+        run_id: int | None,
+        conclusion: CheckConclusion,
+        *,
+        title: str = "",
+        summary: str = "",
+        details: str = "",
+    ) -> None:
+        """Re-post the commit status with the terminal state for its SHA.
+
+        ``details`` is accepted for interface parity with the Checks API
+        path, but commit statuses have no details area.
+        """
+        if run_id is None or not pr_info.head_sha:
+            return
+        # Forgejo's commit statuses accept success/failure/error | pending;
+        # "neutral" (completed with warnings) renders as a success.
+        state = {"success": "success", "failure": "failure", "neutral": "success"}[conclusion]
+        payload: dict[str, str] = {
+            "state": state,
+            "context": CHECK_RUN_NAME,
+            "description": summary,
+        }
+        if pr_info.url:
+            payload["target_url"] = pr_info.url
+        await self._request(
+            "POST",
+            f"{self._repo(pr_info)}/statuses/{quote(pr_info.head_sha, safe='')}",
+            json=payload,
         )
 
     async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:

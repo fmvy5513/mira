@@ -5,6 +5,25 @@
 // In dev, set VITE_API_URL=http://localhost:8100 in ui/mira/.env.local.
 export const API_BASE = import.meta.env.VITE_API_URL || ""
 
+/** Turn a thrown API error into a short, human-readable message.
+ *
+ * Backend errors arrive as `API error <status>: {"detail": "..."}`; return
+ * the `detail` text when present, otherwise the raw message. */
+export function describeApiError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  const match = /^API error (\d+): ([\s\S]*)$/.exec(raw)
+  if (!match) return raw
+  const [, status, body] = match
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown; error?: unknown }
+    const detail = parsed.detail ?? parsed.error
+    if (typeof detail === "string" && detail) return detail
+  } catch {
+    // not JSON — fall through
+  }
+  return body.trim() ? `${body.trim()} (HTTP ${status})` : `HTTP ${status}`
+}
+
 export async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })
   if (!res.ok) {

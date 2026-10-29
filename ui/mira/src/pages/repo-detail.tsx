@@ -26,6 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
 import { api, type ReviewContextModel } from "@/lib/api"
+import { describeApiError } from "@/lib/api/http"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { splitRepoKey } from "@/lib/repo-key"
 
@@ -181,8 +182,8 @@ function RepoDetailPageContent({
     setIndexStatus(full ? "Starting full re-index..." : "Starting index update...")
     try {
       await api.triggerIndex(owner, repo, full)
-    } catch {
-      setIndexStatus("Failed to start indexing")
+    } catch (err) {
+      setIndexStatus(`Failed to start indexing: ${describeApiError(err)}`)
       setIndexing(false)
     }
   }
