@@ -6,10 +6,66 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **PR reviews publish a check run on the head commit**, so the PR and checks pages show a live status row: in progress while the review runs, success/failure on completion (neutral on GitHub when the walkthrough summary was not generated). GitHub uses the Checks API; Forgejo — which has no Checks API — adapts the lifecycle onto commit statuses with a single fixed context that is replaced in place per SHA (its statuses have no neutral state, so a neutral conclusion displays as success). The completed run's expandable details section shows the review stats (files reviewed, comment count with the severity breakdown) so the status row is informative without opening the walkthrough comment.
+
+### Changed
+
+- **GitHub App permission: `checks: read & write`** (newly required; earlier releases needed no check permission). Existing installations must add the permission to see review status updates; a missing permission is logged and the review proceeds without the status.
+
+## [0.10.1] — 2026-10-28
+
+### Fixed
+
+- **Dashboard charts include the complete review history.** Time-series metrics no longer stop at the newest 500 reviews per repository, so older dates, categories, and totals remain visible.
+- **Activity search finds older reviews.** Search scans persisted history before applying the 500-match limit per repository; the unfiltered recent-activity feed is unchanged.
+- **SQLite vulnerability summaries report persisted alerts.** Organization-wide severity counts now include alerts from repository databases, matching the vulnerability listing.
+- **Invalid walkthroughs are retried once.** Empty summaries and leaked tool-call XML are rejected; if the retry also fails, the PR placeholder reports that the walkthrough could not be generated.
+- **Repository file requests preserve refs and paths.** GitHub, GitLab, and Forgejo correctly encode refs containing query delimiters or literal percent sequences, and GitHub content paths preserve filename delimiters.
+- **Repository tree requests preserve branch names.** GitHub, GitLab, and Forgejo correctly encode refs containing slashes, query delimiters, or literal percent sequences so indexing reads the intended tree.
+- **Repository archive requests preserve refs.** Tarball downloads on GitHub, GitLab, and Forgejo correctly encode branch and tag refs instead of treating special characters as URL paths, queries, or fragments.
+- **GitLab and Forgejo archive fetches honor path filters.** Excluded files are discarded during tarball extraction instead of being decoded and retained in memory.
+- **Incomplete repository trees are rejected.** Truncated GitHub trees and incomplete GitLab or Forgejo pagination no longer silently produce partial indexes.
+- **PR vulnerability scans preserve package identity and comment origins.** Internal ecosystem kinds remain intact, findings use the matching manifest location, and repeated occurrences of the same package and version produce one OSV query and finding per scan.
+- **LLM requests follow provider-specific reasoning and token settings.** Chat and Responses requests use the appropriate reasoning controls and output-token fields, including compatible-provider fallbacks.
+- **Agentic tool turns retain reasoning context.** Chat and Responses conversations preserve reasoning data and tool-call identifiers across turns.
+- **Bedrock thinking and tools use compatible request shapes.** Thinking settings, forced tool choice, and tool specifications now follow model requirements.
+- **Codex CLI receives the configured reasoning effort.** Review invocations now pass the selected reasoning setting to the CLI.
+
+## [0.10.0] — 2026-10-26
+
 ### Security
 
-- **Breaking: command authorization is now writer-only by default.** Comment commands (`review`, `review-rest`, `help`, `pause`, `resume`, `reject`, and free-form questions) on GitHub, GitLab, and Forgejo are denied to users without write access to the repository. Permission lookup failures also deny access (fail closed). Previously any commenter could run them. To keep access for read-only users, add them to `commands.allowed_users` (or a per-command `commands.<name>.allowed_users`); `commands.blocked_users` always wins. See `.mira.yaml.example`. This is a high-risk change that warrants a non-author maintainer review and a minor version bump during 0.x.
-- **Free-form thread disagreements now honour the `reject` policy.** A reply that the model classifies as disagreement resolves the thread and records rejected feedback only if the author is allowed to `reject`; the reply itself is still governed by `ask`.
+- **Breaking: comment commands require repository write access by default.** GitHub, GitLab, and Forgejo now check permissions before running `review`, `review-rest`, `help`, `pause`, `resume`, `reject`, or free-form questions. Permission lookup failures deny access. To retain access for read-only users, add them to `commands.allowed_users` or a per-command `commands.<name>.allowed_users` list; `commands.blocked_users` always wins.
+- **Free-form disagreements respect the reject policy.** A reply classified as disagreement resolves the thread and records rejected feedback only when its author can run `reject`; answering the reply also requires `ask` permission.
+- **Malformed outbound webhook URLs are contained.** Invalid URLs are rejected during validation and cannot escape delivery error handling. HTTP redirects and other non-success delivery statuses are reported as failures.
+
+### Added
+
+- **Broader source and configuration file support.** Review and indexing recognize more languages, templates, build files, and configuration formats, while documentation remains excluded from indexing.
+- **Configurable indexing concurrency.** `index.llm_concurrency` controls concurrent LLM summarization batches for full and incremental indexing. The default is 8, with a supported range of 1–32, so deployments can respect provider concurrency limits.
+
+### Fixed
+
+- **Nested GitLab namespaces work throughout the dashboard.** Repository details, setup, rules, learnings, and vulnerability routes accept nested groups, validate repository keys, and render useful breadcrumbs.
+- **GitHub Enterprise uses the configured API URL.** Review and PR-description helpers now build clients against the deployment's configured GitHub endpoint.
+- **Indexing fetches files omitted from tarball caches.** Conventions and package manifests fall back to individual source fetches when the cached archive does not contain them.
+- **Failed initial indexing updates repository status.** Setup failures mark affected repositories as failed instead of leaving them pending indefinitely.
+- **PostgreSQL contributor quality matches SQLite.** Per-author review and feedback quality is available when using the PostgreSQL index store.
+- **Walkthrough parsing accepts capitalized keys.** Capitalized file and change-group keys from model output no longer cause valid walkthrough content to be lost.
+- **Self-critique handles missing verdict indexes.** Positional matching is used only for a complete list of unindexed verdicts, preventing partial results from being assigned to the wrong findings.
+- **JSON output instructions survive provider routing.** Chat Completions and Responses requests keep the required JSON instruction in user input, including when a proxy moves system content into separate instructions.
+- **DeepSeek respects disabled reasoning.** Requests explicitly disable DeepSeek thinking when reasoning is set to `off`.
+- **Codex CLI loads review schemas correctly.** Review schema imports use the shared tool-schema module.
+- **Dependency polling retains distinct npm resolutions.** Multiple installed versions of the same package are preserved during vulnerability polling.
+- **Weekly review metrics use ISO week years.** Reviews around New Year are grouped into the correct ISO week.
+- **React and React DOM stay aligned at 19.3.0.** Matching runtime and type packages prevent the version mismatch that could leave the dashboard blank.
+
+### Changed
+
+- **Clearer review diagnostics.** GitHub webhook filter decisions are logged at INFO level, and LLM failures include transport timing or response-shape details without logging reasoning text.
+- **Dashboard dependencies refreshed.** UI libraries and development tools have been updated, including Vite, ESLint, TypeScript tooling, and formatting utilities.
 
 ## [0.9.1] — 2026-09-23
 
@@ -325,6 +381,8 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.10.1]: https://github.com/miracodeai/mira/releases/tag/v0.10.1
+[0.10.0]: https://github.com/miracodeai/mira/releases/tag/v0.10.0
 [0.9.1]: https://github.com/miracodeai/mira/releases/tag/v0.9.1
 [0.6.0]: https://github.com/miracodeai/mira/releases/tag/v0.6.0
 [0.5.1]: https://github.com/miracodeai/mira/releases/tag/v0.5.1

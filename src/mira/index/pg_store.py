@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     comment_title TEXT NOT NULL DEFAULT '',
     signal TEXT NOT NULL DEFAULT '',
     actor TEXT NOT NULL DEFAULT '',
+    pr_author TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -279,6 +280,10 @@ def _get_conn(url: str) -> Any:
                         f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
                         "TEXT NOT NULL DEFAULT ''"
                     )
+                cur.execute(
+                    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS pr_author "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
                 cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
@@ -910,6 +915,25 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    @contextmanager
+    def iter_review_events(self) -> Iterator[Iterator[ReviewEvent]]:
+        """Stream history on a dedicated read-only transaction and server cursor."""
+        from mira.db.postgres import connect
+
+        with connect(self._url) as conn, conn.transaction():
+            conn.execute("SET TRANSACTION READ ONLY")
+            with conn.cursor(name="mira_review_history") as cursor:
+                cursor.itersize = 128
+                cursor.execute(
+                    "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
+                    "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+                    "categories, created_at, author_avatar_url, reviewed_paths "
+                    "FROM review_events WHERE owner=%s AND repo=%s "
+                    "ORDER BY created_at DESC, id ASC",
+                    (self._owner, self._repo),
+                )
+                yield (ReviewEvent(*row) for row in cursor)
+
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
@@ -1105,6 +1129,41 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def get_review_quality_by_author(self, author: str, since: float | None = None) -> dict:
+        """Sum the blockers/warnings/suggestions raised on one author's PRs."""
+        params: list = [self._owner, self._repo, author]
+        since_clause = ""
+        if since is not None:
+            since_clause = " AND created_at >= %s"
+            params.append(since)
+        row = self._fetchone(
+            "SELECT COUNT(*), COALESCE(SUM(blockers),0), COALESCE(SUM(warnings),0), "
+            "COALESCE(SUM(suggestions),0), COALESCE(SUM(comments_posted),0) "
+            f"FROM review_events WHERE owner=%s AND repo=%s AND author=%s{since_clause}",
+            tuple(params),
+        )
+        return {
+            "reviews": int(row[0] or 0),
+            "blockers": int(row[1] or 0),
+            "warnings": int(row[2] or 0),
+            "suggestions": int(row[3] or 0),
+            "comments_posted": int(row[4] or 0),
+        }
+
+    def get_feedback_quality_by_author(self, pr_author: str) -> dict:
+        """Accept/reject tallies for Mira's feedback on one author's PRs."""
+        rows = self._fetchall(
+            "SELECT signal, COUNT(*) FROM feedback_events "
+            "WHERE owner=%s AND repo=%s AND pr_author=%s GROUP BY signal",
+            (self._owner, self._repo, pr_author),
+        )
+        counts = {signal: int(count) for signal, count in rows}
+        return {
+            "accepted": counts.get("accepted", 0),
+            "rejected": counts.get("rejected", 0),
+            "human_review": counts.get("human_review", 0),
+        }
+
     def get_review_stats(self, since: float | None = None) -> dict:
         params: list = [self._owner, self._repo]
         since_clause = ""
@@ -1260,14 +1319,16 @@ class PgIndexStore(_StoreSharedMixin):
         comment_title: str,
         signal: str,
         actor: str,
+        pr_author: str = "",
     ) -> FeedbackEventRow:
         now = time.time()
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
-                "comment_category, comment_severity, comment_title, signal, actor, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                "comment_category, comment_severity, comment_title, signal, actor, pr_author, "
+                "created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1280,6 +1341,7 @@ class PgIndexStore(_StoreSharedMixin):
                     comment_title,
                     signal,
                     actor,
+                    pr_author,
                     now,
                 ),
             )
@@ -1296,6 +1358,7 @@ class PgIndexStore(_StoreSharedMixin):
             comment_title=comment_title,
             signal=signal,
             actor=actor,
+            pr_author=pr_author,
             created_at=now,
         )
 
@@ -1321,6 +1384,7 @@ class PgIndexStore(_StoreSharedMixin):
                 e["comment_title"],
                 e["signal"],
                 e["actor"],
+                e.get("pr_author", ""),
                 now,
             )
             for e in events
@@ -1329,8 +1393,9 @@ class PgIndexStore(_StoreSharedMixin):
             cur.executemany(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
-                "comment_category, comment_severity, comment_title, signal, actor, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "comment_category, comment_severity, comment_title, signal, actor, pr_author, "
+                "created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
         self._commit()
