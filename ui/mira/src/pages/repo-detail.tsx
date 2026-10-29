@@ -26,7 +26,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
 import { api, type ReviewContextModel } from "@/lib/api"
+import { describeApiError } from "@/lib/api/http"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
+import { splitRepoKey } from "@/lib/repo-key"
 
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return "Never indexed"
@@ -45,21 +47,40 @@ function formatRelativeTime(iso: string | null): string {
 }
 
 export function RepoDetailPage() {
-  const { owner, repo } = useParams<{ owner: string; repo: string }>()
-  useDocumentTitle(owner && repo ? `${owner}/${repo}` : "Repository")
+  const params = useParams<{ "*": string }>()
+  const repoKey = splitRepoKey(params["*"] ?? "")
+  useDocumentTitle(repoKey ? `${repoKey[0]}/${repoKey[1]}` : "Repository")
 
+  if (!repoKey) {
+    return (
+      <div className="p-6 text-sm text-destructive">
+        Invalid repository path.
+      </div>
+    )
+  }
+
+  return <RepoDetailPageContent owner={repoKey[0]} repo={repoKey[1]} />
+}
+
+function RepoDetailPageContent({
+  owner,
+  repo,
+}: {
+  owner: string
+  repo: string
+}) {
   const { data, loading, error } = useAsync(
-    () => api.getRepo(owner!, repo!),
+    () => api.getRepo(owner, repo),
     [owner, repo],
   )
   const { data: packages } = useAsync(
-    () => api.getPackages(owner!, repo!),
+    () => api.getPackages(owner, repo),
     [owner, repo],
   )
   const { data: vulns } = useAsync(
     () =>
       api
-        .getRepoVulnerabilities(owner!, repo!)
+        .getRepoVulnerabilities(owner, repo)
         .catch(() => [] as never),
     [owner, repo],
   )
@@ -161,8 +182,8 @@ export function RepoDetailPage() {
     setIndexStatus(full ? "Starting full re-index..." : "Starting index update...")
     try {
       await api.triggerIndex(owner, repo, full)
-    } catch {
-      setIndexStatus("Failed to start indexing")
+    } catch (err) {
+      setIndexStatus(`Failed to start indexing: ${describeApiError(err)}`)
       setIndexing(false)
     }
   }
@@ -493,7 +514,7 @@ export function RepoDetailPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <BlastRadiusList owner={owner!} repo={repo!} />
+              <BlastRadiusList owner={owner} repo={repo} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -531,11 +552,10 @@ function BlastRadiusList({ owner, repo }: { owner: string; repo: string }) {
         <div className="space-y-3">
           <h3 className="text-sm font-medium">Cross-Repo References</h3>
           {data!.cross_repo.map((entry) => {
-            const [rOwner, rRepo] = entry.repo.split("/")
             return (
               <div key={entry.repo} className="rounded-lg border p-3">
                 <Link
-                  to={`/repos/${rOwner}/${rRepo}`}
+                  to={`/repos/${entry.repo}`}
                   className="text-sm font-medium hover:underline"
                 >
                   {entry.repo}

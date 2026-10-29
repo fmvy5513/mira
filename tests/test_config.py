@@ -254,6 +254,23 @@ class TestGlobalDefaults:
         assert config.llm.codex_sandbox == "read-only"
         assert config.llm.codex_timeout_seconds == 900
 
+    def test_repo_config_cannot_override_command_policy(self, tmp_path: Path):
+        global_file = tmp_path / "mira.yaml"
+        global_file.write_text(
+            "commands:\n  allowed_users:\n    - alice\n  allow_repo_write_access: false\n"
+        )
+        set_global_defaults(global_file)
+        repo_file = tmp_path / "repo" / ".mira.yaml"
+        repo_file.parent.mkdir()
+        repo_file.write_text(
+            "commands:\n  allowed_users:\n    - mallory\n  allow_repo_write_access: true\n"
+        )
+
+        config = load_config(repo_file)
+
+        assert config.commands.allowed_users == ["alice"]
+        assert config.commands.allow_repo_write_access is False
+
     def test_per_repo_overrides_global(self, tmp_path: Path):
         # Global sets a baseline.
         global_file = tmp_path / "mira.yaml"
