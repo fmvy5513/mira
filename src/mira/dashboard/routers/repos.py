@@ -31,6 +31,7 @@ from mira.dashboard.api import (
     logger,
     router,
 )
+from mira.dashboard.db import RepoRecord
 from mira.index.store import IndexStore
 
 
@@ -383,6 +384,89 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
     return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
 
 
+async def _resolve_github_token(full_name: str, records: list[RepoRecord]) -> tuple[str, str]:
+    """Return ``(token, error)`` for a GitHub repo.
+
+    Prefer ``GITHUB_TOKEN``. Otherwise mint an installation token: use the
+    ``installation_id`` stored on the repo record (one API call) before
+    falling back to scanning every installation the App is on. The error
+    string names the concrete failure so the dashboard can show it instead
+    of a generic "could not start indexing".
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        return token, ""
+
+    app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
+    private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
+    if not app_id or not private_key:
+        return "", "No GitHub token available. Set GITHUB_TOKEN or configure GitHub App."
+
+    from mira.platforms.github.auth import GitHubAppAuth
+
+    try:
+        auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+    except Exception as exc:
+        logger.warning("Failed to initialise GitHub App auth: %s", exc)
+        return "", f"GitHub App credentials are invalid: {exc}"
+
+    # Fast path: the installation the repo was registered under.
+    stored_ids = {
+        int(r.installation_id) for r in records if r.platform == "github" and r.installation_id
+    }
+    for inst_id in sorted(stored_ids):
+        try:
+            return await auth.get_installation_token(inst_id), ""
+        except Exception as exc:
+            logger.warning(
+                "Stored installation %d for %s is unusable (%s); scanning installations",
+                inst_id,
+                full_name,
+                exc,
+            )
+
+    # Slow path: find the installation that can see this repo.
+    try:
+        installations = await auth.list_installations()
+    except Exception as exc:
+        logger.warning("Failed to list GitHub App installations: %s", exc)
+        return "", f"Could not list GitHub App installations: {exc}"
+    if not installations:
+        return "", (
+            "GitHub App has no installations (or listing them failed — check "
+            "MIRA_GITHUB_APP_ID / MIRA_GITHUB_PRIVATE_KEY and the server logs)."
+        )
+
+    for inst in installations:
+        raw_id = inst.get("id", 0)
+        inst_id = raw_id if isinstance(raw_id, int) else 0
+        if not inst_id:
+            continue
+        try:
+            repos = await auth.list_installation_repos(inst_id)
+        except Exception as exc:
+            logger.warning("Failed to list repos for installation %d: %s", inst_id, exc)
+            continue
+        if any(r.get("full_name") == full_name for r in repos):
+            try:
+                token = await auth.get_installation_token(inst_id)
+            except Exception as exc:
+                logger.warning("Failed to get GitHub token for %s: %s", full_name, exc)
+                return "", f"Failed to get installation token for {full_name}: {exc}"
+            # Remember the installation so the next trigger takes the fast path.
+            owner, repo = full_name.split("/", 1)
+            try:
+                _api._app_db.register_repo(owner, repo, installation_id=inst_id)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug("Could not persist installation id for %s: %s", full_name, exc)
+            return token, ""
+
+    return "", (
+        f"GitHub App is not installed on {full_name}. Install the App on the "
+        "repository (or set GITHUB_TOKEN) and try again."
+    )
+
+
 @router.post("/api/repos/{owner:path}/{repo}/index")
 async def trigger_index(owner: str, repo: str, request: Request, full: bool = False) -> dict:
     """Trigger indexing for a repo. full=true wipes and re-indexes everything."""
@@ -413,31 +497,9 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
     else:
-        token = os.environ.get("GITHUB_TOKEN", "")
+        token, token_error = await _resolve_github_token(full_name, records)
         if not token:
-            try:
-                from mira.platforms.github.auth import GitHubAppAuth
-
-                app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
-                private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-                if app_id and private_key:
-                    auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                    installations = await auth.list_installations()
-                    for inst in installations:
-                        inst_id = int(inst.get("id", 0))
-                        if inst_id:
-                            repos = await auth.list_installation_repos(inst_id)
-                            if any(r.get("full_name") == full_name for r in repos):
-                                token = await auth.get_installation_token(inst_id)
-                                break
-            except Exception as exc:
-                logger.warning("Failed to get GitHub token: %s", exc)
-
-        if not token:
-            raise HTTPException(
-                status_code=400,
-                detail="No GitHub token available. Set GITHUB_TOKEN or configure GitHub App.",
-            )
+            raise HTTPException(status_code=400, detail=token_error)
 
     fetcher = make_fetcher(platform, token)
 

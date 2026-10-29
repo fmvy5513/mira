@@ -14,6 +14,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **GitHub App permission: `checks: read & write`** (newly required; earlier releases needed no check permission). Existing installations must add the permission to see review status updates; a missing permission is logged and the review proceeds without the status.
 
+### Fixed
+
+- **Dashboard re-index uses the repository's stored GitHub App installation.** Triggering an index from the repo page mints the installation token directly instead of scanning every installation and repository the App can see, so large installations no longer time out or fall back to a generic error. When the stored installation is stale the scan still runs and the resolved installation is persisted. The repo page now shows the backend's actual error (missing credentials, App not installed, token failure) instead of "Failed to start indexing".
+
 ## [0.10.1] — 2026-10-28
 
 ### Fixed
