@@ -380,20 +380,30 @@ async def dispatch_gitlab_event(
     if event == "Push Hook":
         from mira.platforms.gitlab import push_review
 
-        if push_review.matches(payload):
+        review = push_review.matches(payload)
+        index = (
+            payload.get("ref")
+            == f"refs/heads/{payload.get('project', {}).get('default_branch', 'main')}"
+        )
+        if review or index:
             cfg = load_config()
             if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
                 return "ignored"
-            background_tasks.add_task(push_review.review_push, payload, auth, bot_name)
-            return "processing"
-        ref = payload.get("ref", "")
-        default_branch = payload.get("project", {}).get("default_branch", "main")
-        if ref == f"refs/heads/{default_branch}":
-            cfg = load_config()
-            if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
-                logger.debug("push skipped — author %s filtered", actor)
-                return "ignored"
-            background_tasks.add_task(handle_gitlab_push, payload, auth, bot_name)
+            if review and index:
+                background_tasks.add_task(_review_and_index_push, payload, auth, bot_name)
+            elif review:
+                background_tasks.add_task(push_review.review_push, payload, auth, bot_name)
+            else:
+                background_tasks.add_task(handle_gitlab_push, payload, auth, bot_name)
             return "processing"
 
     return "ignored"
+
+
+async def _review_and_index_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
+    from mira.platforms.gitlab.push_review import review_push
+
+    try:
+        await review_push(payload, auth, bot_name)
+    finally:
+        await handle_gitlab_push(payload, auth, bot_name)

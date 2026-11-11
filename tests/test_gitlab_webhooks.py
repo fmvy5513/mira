@@ -327,6 +327,8 @@ async def test_note_non_review_ignores_author_filter(client):
         ("rhet/physical-school-management-system", "refs/heads/dev", "a" * 40, "processing"),
         ("rhet/physical-school-management-system", "refs/heads/dev", "0" * 40, "ignored"),
         ("rhet/physical-school-management-system", "refs/heads/feature", "a" * 40, "ignored"),
+        ("rhet/team/project", "refs/heads/dev", "a" * 40, "processing"),
+        ("rhet-other/project", "refs/heads/dev", "a" * 40, "ignored"),
         ("other/physical-school-management-system", "refs/heads/dev", "a" * 40, "ignored"),
     ],
 )
@@ -357,7 +359,12 @@ async def test_dev_push_reviews_range_posts_on_head_and_skips_replay(gitlab_auth
     from mira.platforms.gitlab import push_review as push
 
     before, head = "a" * 40, "b" * 40
-    payload = {"before": before, "after": head}
+    payload = {
+        "before": before,
+        "after": head,
+        "project": {"path_with_namespace": "rhet/sub/app"},
+        "ref": "refs/heads/main",
+    }
     provider = Mock(_api="https://example.invalid/api/v4")
     provider._paginate = AsyncMock(return_value=[])
     provider._request = AsyncMock(
@@ -381,8 +388,40 @@ async def test_dev_push_reviews_range_posts_on_head_and_skips_replay(gitlab_auth
         assert get.kwargs["params"] == {"from": before, "to": head, "straight": "true"}
         assert post.args[0] == "POST" and post.args[1].endswith(f"/commits/{head}/comments")
         note = post.kwargs["json"]["note"]
+        assert "rhet%2Fsub%2Fapp" in post.args[1]
+        assert "main push review" in note
         assert "Reviewed the change." in note
         assert "+new" in engine.review_diff.await_args.args[0]
         provider._paginate.return_value = [{"author": {"username": BOT}, "note": note}]
         await push.review_push(payload, gitlab_auth, BOT)
         assert provider._request.await_count == 2
+
+
+async def test_rhet_main_schedules_review_and_indexes_even_on_failure(gitlab_auth):
+    from unittest.mock import Mock
+
+    from mira.platforms.gitlab import webhook
+
+    payload = {
+        "ref": "refs/heads/main",
+        "before": "a" * 40,
+        "after": "b" * 40,
+        "project": {"path_with_namespace": "rhet/sub/app", "default_branch": "main"},
+    }
+    tasks = Mock()
+    assert (
+        await webhook.dispatch_gitlab_event("Push Hook", payload, gitlab_auth, BOT, tasks)
+        == "processing"
+    )
+    fn, *args = tasks.add_task.call_args.args
+    with (
+        patch(
+            "mira.platforms.gitlab.push_review.review_push",
+            new=AsyncMock(side_effect=RuntimeError("review")),
+        ) as review,
+        patch.object(webhook, "handle_gitlab_push", new=AsyncMock()) as index,
+    ):
+        with pytest.raises(RuntimeError, match="review"):
+            await fn(*args)
+        review.assert_awaited_once()
+        index.assert_awaited_once_with(payload, gitlab_auth, BOT)

@@ -1,4 +1,4 @@
-"""Review direct pushes to PSMS dev and publish on the immutable head commit."""
+"""Review rhet dev/main pushes and publish on the immutable head commit."""
 
 import logging
 import re
@@ -11,17 +11,18 @@ from mira.llm import create_llm
 from mira.platforms.auth import PlatformAuth
 from mira.providers.gitlab import GitLabProvider, _build_unified_diff
 
-PROJECT = "rhet/physical-school-management-system"
-REF = "refs/heads/dev"
+REFS = {"refs/heads/dev", "refs/heads/main"}
 ZERO = "0" * 40
-_running: set[tuple[str, str]] = set()
+_running: set[tuple[str, str, str, str]] = set()
 logger = logging.getLogger(__name__)
 
 
 def matches(payload: dict) -> bool:
+    path = payload.get("project", {}).get("path_with_namespace") or ""
     return (
-        payload.get("project", {}).get("path_with_namespace") == PROJECT
-        and payload.get("ref") == REF
+        path.startswith("rhet/")
+        and all(part and part not in {".", ".."} for part in path.split("/"))
+        and payload.get("ref") in REFS
         and all(re.fullmatch(r"[0-9a-f]{40}", str(payload.get(k, ""))) for k in ("before", "after"))
         and payload["after"] not in (ZERO, payload["before"])
     )
@@ -29,15 +30,17 @@ def matches(payload: dict) -> bool:
 
 async def review_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
     before, head = payload["before"], payload["after"]
-    key = before, head
+    path = payload["project"]["path_with_namespace"]
+    branch = payload["ref"].removeprefix("refs/heads/")
+    key = path, branch, before, head
     if key in _running:
         return
     _running.add(key)
     try:
         provider = GitLabProvider(await auth.get_token())
-        project = f"{provider._api}/projects/{quote(PROJECT, safe='')}/repository"
+        project = f"{provider._api}/projects/{quote(path, safe='')}/repository"
         commit = f"{project}/commits/{head}"
-        marker = f"<!-- mira-dev-push:{before}:{head} -->"
+        marker = f"<!-- mira-{branch}-push:{before}:{head} -->"
         bot = await auth.get_bot_identity()
         notes = await provider._paginate(f"{commit}/comments")
         if bot and any(
@@ -66,7 +69,7 @@ async def review_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
         )
         result = await engine.review_diff(diff)
         parts = [
-            f"### Mira dev push review · `{head[:8]}`",
+            f"### Mira {branch} push review · `{head[:8]}`",
             result.skipped_reason or result.summary,
         ]
         if result.walkthrough and result.walkthrough.summary:
@@ -81,9 +84,9 @@ async def review_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
             )
         note = "\n\n".join(filter(None, parts))[:60000] + "\n\n" + marker
         await provider._request("POST", f"{commit}/comments", json={"note": note})
-        logger.info("Published dev push review for %s@%s", PROJECT, head)
+        logger.info("Published push review for %s@%s", path, head)
     except Exception:
-        logger.exception("Failed dev push review for %s@%s", PROJECT, head)
+        logger.exception("Failed push review for %s@%s", path, head)
         raise
     finally:
         _running.discard(key)
