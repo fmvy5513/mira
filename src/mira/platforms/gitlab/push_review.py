@@ -1,13 +1,17 @@
 """Review rhet dev/main pushes and publish on the immutable head commit."""
 
+import json
 import logging
 import re
+import time
 from urllib.parse import quote
 
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.dashboard.models_config import llm_config_for
+from mira.index.store import IndexStore
 from mira.llm import create_llm
+from mira.models import ReviewResult, Severity
 from mira.platforms.auth import PlatformAuth
 from mira.providers.gitlab import GitLabProvider, _build_unified_diff
 
@@ -59,6 +63,7 @@ async def review_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
                 raise RuntimeError("GitLab compare timed out")
             changes = comparison["diffs"]
         diff = _build_unified_diff(changes)
+        started = time.monotonic()
         cfg = load_config()
         engine = ReviewEngine(
             config=cfg,
@@ -85,8 +90,63 @@ async def review_push(payload: dict, auth: PlatformAuth, bot_name: str) -> None:
         note = "\n\n".join(filter(None, parts))[:60000] + "\n\n" + marker
         await provider._request("POST", f"{commit}/comments", json={"note": note})
         logger.info("Published push review for %s@%s", path, head)
+        _record_push_review(
+            payload,
+            branch=branch,
+            diff=diff,
+            result=result,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
     except Exception:
         logger.exception("Failed push review for %s@%s", path, head)
         raise
     finally:
         _running.discard(key)
+
+
+def _record_push_review(
+    payload: dict, *, branch: str, diff: str, result: ReviewResult, duration_ms: int
+) -> None:
+    """Record a push review so the dashboard counts it (best effort).
+
+    Dashboard stats and charts read ``review_events`` from each registered
+    repo's index store. Push reviews have no merge request, so they are stored
+    with ``pr_number=0`` and the head commit as the link. GitLab sends no
+    install event, so the project is registered here too, as an MR would.
+    """
+    head = payload["after"]
+    path = payload["project"]["path_with_namespace"]
+    owner, _, repo = path.rpartition("/")
+    if result.skipped_reason and not result.reviewed_files:
+        return
+    try:
+        from mira.platforms.index_handlers import _get_app_db
+
+        _get_app_db().register_repo(owner, repo, platform="gitlab")
+        web_url = payload["project"].get("web_url") or ""
+        store = IndexStore.open(owner, repo, platform="gitlab")
+        try:
+            store.record_review(
+                pr_number=0,
+                pr_title=f"{branch} push {head[:8]}",
+                pr_url=f"{web_url}/-/commit/{head}" if web_url else "",
+                comments_posted=len(result.comments),
+                blockers=sum(c.severity == Severity.BLOCKER for c in result.comments),
+                warnings=sum(c.severity == Severity.WARNING for c in result.comments),
+                suggestions=sum(
+                    c.severity in (Severity.SUGGESTION, Severity.NITPICK) for c in result.comments
+                ),
+                files_reviewed=result.reviewed_files,
+                # Same count the PR review path uses, so charts stay comparable.
+                lines_changed=sum(1 for line in diff.splitlines() if line.startswith(("+", "-"))),
+                tokens_used=result.token_usage.get("total_tokens", 0),
+                duration_ms=duration_ms,
+                categories=",".join(sorted({c.category for c in result.comments if c.category})),
+                author=payload.get("user_username") or "",
+                author_avatar_url=payload.get("user_avatar") or "",
+                reviewed_paths=json.dumps(result.reviewed_paths or []),
+            )
+        finally:
+            store.close()
+    except Exception:
+        logger.warning("Failed to record push review for %s@%s", path, head, exc_info=True)
