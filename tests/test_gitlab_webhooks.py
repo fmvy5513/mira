@@ -319,3 +319,70 @@ async def test_note_non_review_ignores_author_filter(client):
         )
     assert resp.json()["status"] == "processing"
     h.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "path,ref,after,expected",
+    [
+        ("rhet/physical-school-management-system", "refs/heads/dev", "a" * 40, "processing"),
+        ("rhet/physical-school-management-system", "refs/heads/dev", "0" * 40, "ignored"),
+        ("rhet/physical-school-management-system", "refs/heads/feature", "a" * 40, "ignored"),
+        ("other/physical-school-management-system", "refs/heads/dev", "a" * 40, "ignored"),
+    ],
+)
+async def test_dev_push_scope(gitlab_auth, path, ref, after, expected):
+    from unittest.mock import Mock
+
+    from mira.platforms.gitlab.push_review import review_push
+    from mira.platforms.gitlab.webhook import dispatch_gitlab_event
+
+    tasks = Mock()
+    payload = {
+        "ref": ref,
+        "before": "b" * 40,
+        "after": after,
+        "project": {"path_with_namespace": path},
+    }
+    assert await dispatch_gitlab_event("Push Hook", payload, gitlab_auth, BOT, tasks) == expected
+    if expected == "processing":
+        tasks.add_task.assert_called_once_with(review_push, payload, gitlab_auth, BOT)
+    else:
+        tasks.add_task.assert_not_called()
+
+
+async def test_dev_push_reviews_range_posts_on_head_and_skips_replay(gitlab_auth):
+    from unittest.mock import Mock
+
+    from mira.models import ReviewResult
+    from mira.platforms.gitlab import push_review as push
+
+    before, head = "a" * 40, "b" * 40
+    payload = {"before": before, "after": head}
+    provider = Mock(_api="https://example.invalid/api/v4")
+    provider._paginate = AsyncMock(return_value=[])
+    provider._request = AsyncMock(
+        return_value=Mock(
+            json=lambda: {
+                "diffs": [
+                    {"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1 +1 @@\n-old\n+new\n"}
+                ]
+            }
+        )
+    )
+    engine = Mock(review_diff=AsyncMock(return_value=ReviewResult(summary="Reviewed the change.")))
+    with (
+        patch.object(push, "GitLabProvider", return_value=provider),
+        patch.object(push, "ReviewEngine", return_value=engine),
+        patch.object(push, "create_llm"),
+        patch.object(push, "llm_config_for"),
+    ):
+        await push.review_push(payload, gitlab_auth, BOT)
+        get, post = provider._request.await_args_list
+        assert get.kwargs["params"] == {"from": before, "to": head, "straight": "true"}
+        assert post.args[0] == "POST" and post.args[1].endswith(f"/commits/{head}/comments")
+        note = post.kwargs["json"]["note"]
+        assert "Reviewed the change." in note
+        assert "+new" in engine.review_diff.await_args.args[0]
+        provider._paginate.return_value = [{"author": {"username": BOT}, "note": note}]
+        await push.review_push(payload, gitlab_auth, BOT)
+        assert provider._request.await_count == 2

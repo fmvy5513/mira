@@ -378,6 +378,14 @@ async def dispatch_gitlab_event(
         return "ignored"
 
     if event == "Push Hook":
+        from mira.platforms.gitlab import push_review
+
+        if push_review.matches(payload):
+            cfg = load_config()
+            if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                return "ignored"
+            background_tasks.add_task(push_review.review_push, payload, auth, bot_name)
+            return "processing"
         ref = payload.get("ref", "")
         default_branch = payload.get("project", {}).get("default_branch", "main")
         if ref == f"refs/heads/{default_branch}":
