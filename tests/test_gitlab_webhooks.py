@@ -382,8 +382,10 @@ async def test_dev_push_reviews_range_posts_on_head_and_skips_replay(gitlab_auth
         patch.object(push, "ReviewEngine", return_value=engine),
         patch.object(push, "create_llm"),
         patch.object(push, "llm_config_for"),
+        patch.object(push, "_record_push_review") as record,
     ):
         await push.review_push(payload, gitlab_auth, BOT)
+        record.assert_called_once()
         get, post = provider._request.await_args_list
         assert get.kwargs["params"] == {"from": before, "to": head, "straight": "true"}
         assert post.args[0] == "POST" and post.args[1].endswith(f"/commits/{head}/comments")
@@ -425,3 +427,57 @@ async def test_rhet_main_schedules_review_and_indexes_even_on_failure(gitlab_aut
             await fn(*args)
         review.assert_awaited_once()
         index.assert_awaited_once_with(payload, gitlab_auth, BOT)
+
+
+def test_push_review_is_recorded_for_dashboard_charts(tmp_path, monkeypatch):
+    from mira.dashboard import api
+    from mira.dashboard.db import AppDatabase
+    from mira.index.store import IndexStore
+    from mira.models import ReviewComment, ReviewResult, Severity
+    from mira.platforms.gitlab import push_review as push
+
+    monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    db = AppDatabase(url="", admin_password="admin")
+    monkeypatch.setattr(api, "_app_db", db)
+    head = "c" * 40
+    payload = {
+        "after": head,
+        "user_username": "alice",
+        "project": {
+            "path_with_namespace": "rhet/sub/app",
+            "web_url": "https://gitlab.example/rhet/sub/app",
+        },
+    }
+    result = ReviewResult(
+        summary="ok",
+        reviewed_files=1,
+        token_usage={"total_tokens": 42},
+        comments=[
+            ReviewComment(
+                path="a.py",
+                line=1,
+                end_line=None,
+                severity=Severity.BLOCKER,
+                category="bug",
+                title="t",
+                body="b",
+                confidence=0.9,
+            )
+        ],
+    )
+    diff = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    push._record_push_review(payload, branch="dev", diff=diff, result=result, duration_ms=5)
+
+    assert db.get_repo("rhet/sub", "app", platform="gitlab") is not None
+    store = IndexStore.open("rhet/sub", "app", platform="gitlab")
+    try:
+        [event] = store.list_review_events()
+    finally:
+        store.close()
+    db.close()
+    assert event.pr_title == f"dev push {head[:8]}"
+    assert event.pr_url.endswith(f"/-/commit/{head}")
+    assert (event.blockers, event.lines_changed, event.tokens_used) == (1, 4, 42)
+    assert event.author == "alice" and event.categories == "bug"
