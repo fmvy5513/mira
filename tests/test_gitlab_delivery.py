@@ -186,7 +186,6 @@ def test_incomplete_version_or_external_only_pipeline_cannot_start_gate(overflow
     }
     replies = [
         Response([{"id": 11, "sha": "a" * 40, "source": source}]),
-        Response({"id": 99, "pipeline_id": 11}),
         Response([{"id": 5, "head_commit_sha": "a" * 40}]),
         Response(version),
         Response({"commit": {"id": "b" * 40}}),
@@ -208,7 +207,9 @@ def test_engine_runs_actual_delivery_hooks_with_original_fetched_input():
     provider = GitLabProvider("synthetic")
     original = pr()
     result = valid_result()
-    handle = {"source_sha": original.head_sha}
+    from mira.providers.base import DeliveryReviewSession
+
+    handle = DeliveryReviewSession(source_sha=original.head_sha, target_base_sha="b" * 40)
     events = []
 
     async def start(value):

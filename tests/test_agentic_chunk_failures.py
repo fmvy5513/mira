@@ -385,6 +385,7 @@ async def test_failed_paths_are_retryable_through_review_rest(monkeypatch, tmp_p
     monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
 
     provider = AsyncMock()
+    provider.requires_full_delivery_review = MagicMock(return_value=False)
     provider.get_pr_info.return_value = PRInfo(
         title="Test",
         description="",

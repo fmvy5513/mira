@@ -33,7 +33,8 @@ def chunk_files(
 
     Uses greedy first-fit-decreasing: sort files by estimated token count
     (largest first), then fit each into the first chunk with room.
-    Single oversized files get their own chunk with trailing hunks dropped.
+    Oversized files are split only between complete hunks. An indivisible hunk
+    exceeding the budget stays intact and is explicitly marked incomplete.
     """
     if not files:
         return []
@@ -45,10 +46,7 @@ def chunk_files(
     # Compute estimates
     estimates: list[tuple[FileDiff, int]] = []
     for f in files:
-        if provider:
-            est = provider.count_tokens("\n".join(h.content for h in f.hunks))
-        else:
-            est = _file_token_estimate(f)
+        est = _tokens(f, provider)
         estimates.append((f, est))
 
     # Sort largest first
@@ -59,13 +57,7 @@ def chunk_files(
     for file_diff, est in estimates:
         # Handle oversized files
         if est > available:
-            truncated = _truncate_file(file_diff, available)
-            chunks.append(
-                ReviewChunk(
-                    files=[truncated],
-                    token_estimate=available,
-                )
-            )
+            chunks.extend(_split_file(file_diff, available, provider))
             continue
 
         # Find first chunk with room
@@ -88,20 +80,44 @@ def chunk_files(
     return chunks
 
 
-def _truncate_file(file_diff: FileDiff, max_tokens: int) -> FileDiff:
-    """Truncate a file by dropping trailing hunks to fit within token limit."""
-    kept_hunks = []
-    tokens_used = 20  # overhead
+def _tokens(file_diff: FileDiff, provider: LLMProviderProtocol | None) -> int:
+    if provider is None:
+        return _file_token_estimate(file_diff)
+    return (
+        provider.count_tokens("\n".join(h.content for h in file_diff.hunks))
+        + len(file_diff.path) // 4
+        + 20
+    )
+
+
+def _split_file(
+    file_diff: FileDiff, available: int, provider: LLMProviderProtocol | None
+) -> list[ReviewChunk]:
+    """Preserve every hunk; never pretend an over-budget fragment was reviewed."""
+    chunks = []
+    pending = []
+
+    def emit(hunks, incomplete=False):
+        fragment = replace(file_diff, hunks=list(hunks))
+        chunks.append(
+            ReviewChunk(
+                files=[fragment],
+                token_estimate=_tokens(fragment, provider),
+                incomplete_paths=[file_diff.path] if incomplete else [],
+            )
+        )
 
     for hunk in file_diff.hunks:
-        hunk_tokens = _estimate_tokens(hunk.content)
-        if tokens_used + hunk_tokens > max_tokens:
-            break
-        kept_hunks.append(hunk)
-        tokens_used += hunk_tokens
-
-    # Always keep at least the first hunk
-    if not kept_hunks and file_diff.hunks:
-        kept_hunks = [file_diff.hunks[0]]
-
-    return replace(file_diff, hunks=kept_hunks)
+        trial = replace(file_diff, hunks=[*pending, hunk])
+        if pending and _tokens(trial, provider) > available:
+            emit(pending)
+            pending = []
+        if _tokens(replace(file_diff, hunks=[hunk]), provider) > available:
+            emit([hunk], incomplete=True)
+        else:
+            pending.append(hunk)
+    if pending:
+        emit(pending)
+    if not chunks:
+        emit([], incomplete=True)
+    return chunks

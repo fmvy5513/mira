@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Literal
 
 from mira.models import (
@@ -18,6 +19,14 @@ CheckConclusion = Literal["success", "failure", "neutral"]
 CHECK_RUN_NAME = "Mira"
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeliveryReviewSession:
+    """Provider-owned session bound to immutable review input revisions."""
+
+    source_sha: str
+    target_base_sha: str
+
+
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
@@ -28,11 +37,11 @@ class BaseProvider(abc.ABC):
     def requires_full_delivery_review(self, pr_info: PRInfo) -> bool:
         return False
 
-    async def start_delivery_review(self, pr_info: PRInfo) -> dict | None:
+    async def start_delivery_review(self, pr_info: PRInfo) -> DeliveryReviewSession | None:
         return None
 
     async def finish_delivery_review(
-        self, pr_info: PRInfo, handle: dict | None, result: ReviewResult | None
+        self, pr_info: PRInfo, handle: DeliveryReviewSession | None, result: ReviewResult | None
     ) -> None:
         return
 

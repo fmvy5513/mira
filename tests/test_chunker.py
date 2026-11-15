@@ -35,12 +35,14 @@ class TestChunkFiles:
         chunks = chunk_files(files, max_tokens=5000)
         assert len(chunks) > 1
 
-    def test_oversized_file_gets_truncated(self):
+    def test_oversized_single_hunk_is_retained_and_marked_incomplete(self):
         large = _make_file("big.py", 100000)
         chunks = chunk_files([large], max_tokens=5000)
         assert len(chunks) == 1
-        # File should still be included (truncated)
         assert len(chunks[0].files) == 1
+        assert chunks[0].files[0].hunks == large.hunks
+        assert chunks[0].incomplete_paths == ["big.py"]
+        assert chunks[0].token_estimate > 3000
 
     def test_empty_input(self):
         chunks = chunk_files([], max_tokens=10000)

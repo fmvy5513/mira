@@ -324,9 +324,10 @@ class TestReviewEngine:
         llm.complete = AsyncMock(return_value=good_response)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        # Force two chunks by setting a very low token limit
+        # Reserve the 2,000-token prompt overhead, then fit one complete file
+        # (~73 measured tokens including path overhead) per 100-token chunk.
         config = MiraConfig()
-        config.llm.max_context_tokens = 100
+        config.llm.max_context_tokens = 2100
         config.filter.confidence_threshold = 0.0
 
         engine = ReviewEngine(config=config, llm=llm)
@@ -334,6 +335,8 @@ class TestReviewEngine:
 
         # Should still have comments from the successful chunk
         assert result.reviewed_files > 0
+        assert review_call_count >= 2
+        assert result.failed_paths
         # The pipeline completed without raising
 
     @pytest.mark.asyncio
@@ -954,7 +957,7 @@ class TestReviewEngine:
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         config = MiraConfig()
-        config.llm.max_context_tokens = 100  # Force multiple chunks
+        config.llm.max_context_tokens = 2100  # 2,000 overhead + room for one complete file
         config.filter.confidence_threshold = 0.0
 
         engine = ReviewEngine(config=config, llm=llm)

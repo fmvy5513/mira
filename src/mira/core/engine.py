@@ -909,6 +909,7 @@ class ReviewEngine:
         # round 1 onto never-reviewed files, so it stays round 1 (full
         # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_full_delivery = self.provider.requires_full_delivery_review(pr_info) is True
         is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
@@ -917,7 +918,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads and not is_review_rest:
+                if all_bot_threads and not is_review_rest and not is_full_delivery:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -926,7 +927,7 @@ class ReviewEngine:
                         "description": short_thread_description(t.body),
                     }
                     for t in all_bot_threads
-                    if t.is_resolved
+                    if t.is_resolved and not is_full_delivery
                 ]
         except Exception as exc:
             logger.warning("Failed to compute review round: %s", exc)
@@ -1752,6 +1753,20 @@ class ReviewEngine:
             idx: int,
             chunk: ReviewChunk,
         ) -> _ChunkOutcome:
+            if idx >= self.config.review.max_chunks_per_review:
+                return _ChunkOutcome(
+                    failure=_chunk_failure(
+                        idx, chunk, "Review chunk budget exceeded; this fragment was not reviewed"
+                    )
+                )
+            if chunk.incomplete_paths:
+                return _ChunkOutcome(
+                    failure=_chunk_failure(
+                        idx,
+                        chunk,
+                        "Input budget exceeded by a complete hunk; this file was not fully reviewed",
+                    )
+                )
             raw_response = ""
             hops: int | None = None
             async with semaphore:

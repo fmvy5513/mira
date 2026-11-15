@@ -210,20 +210,116 @@ class GitLabProvider(DeliveryReviewMixin, BaseProvider):
         return "none"
 
     async def _changes(self, pr_info: PRInfo) -> dict[str, Any]:
-        pinned = getattr(self, "_delivery_inputs", {}).get(self._delivery_key(pr_info))
+        key = self._delivery_key(pr_info)
+        pinned = getattr(self, "_delivery_inputs", {}).get(key)
+        if pinned is not None:
+            return pinned.review_inputs()
+        if pinned is None:
+            pinned = getattr(self, "_review_inputs", {}).get(key)
         if pinned is not None:
             return {"diff_refs": pinned["diff_refs"], "changes": pinned["changes"]}
         resp = await self._request("GET", f"{self._mr(pr_info)}/changes")
         return resp.json()
 
+    async def _complete_review_inputs(self, pr_info: PRInfo) -> dict[str, Any]:
+        """Read an exact collected version, never the lossy legacy /changes view."""
+        if not re.fullmatch(r"[0-9a-f]{40}", pr_info.head_sha):
+            raise ProviderError("MR review requires an exact source SHA")
+        mr_url = self._mr(pr_info)
+
+        async def require_current_revision() -> None:
+            current = (await self._request("GET", mr_url)).json()
+            if (
+                current.get("sha") != pr_info.head_sha
+                or current.get("target_branch") != pr_info.base_branch
+            ):
+                raise ProviderError("MR source or target changed during diff retrieval")
+
+        await require_current_revision()
+        version = None
+        for page in range(1, 101):
+            entries = (
+                await self._request("GET", f"{mr_url}/versions?per_page=100&page={page}")
+            ).json()
+            if not isinstance(entries, list):
+                raise ProviderError("The exact input diff version is unavailable")
+            version = next(
+                (
+                    entry
+                    for entry in entries
+                    if isinstance(entry, dict) and entry.get("head_commit_sha") == pr_info.head_sha
+                ),
+                None,
+            )
+            if version is not None or len(entries) < 100:
+                break
+        if version is None or not str(version.get("id", "")).isdigit():
+            raise ProviderError("The exact input diff version is unavailable")
+        data = (await self._request("GET", f"{mr_url}/versions/{int(version['id'])}")).json()
+        changes = data.get("diffs")
+        if (
+            data.get("head_commit_sha") != pr_info.head_sha
+            or data.get("state") != "collected"
+            or data.get("overflow")
+            or not isinstance(changes, list)
+            or not str(data.get("real_size", "")).isdigit()
+            or int(data["real_size"]) != len(changes)
+            or any(
+                not isinstance(item, dict)
+                or item.get("collapsed")
+                or item.get("too_large")
+                or not isinstance(item.get("diff"), str)
+                or not item["diff"].strip()
+                or not isinstance(item.get("new_path"), str)
+                or not item["new_path"]
+                for item in changes
+            )
+        ):
+            raise ProviderError("The exact input diff version is incomplete; review was not run")
+        paths = [item["new_path"] for item in changes]
+        if len(set(paths)) != len(paths):
+            raise ProviderError("The exact input diff version contains duplicate paths")
+        if any(
+            not re.fullmatch(r"[0-9a-f]{40}", str(data.get(field, "")))
+            for field in ("base_commit_sha", "start_commit_sha")
+        ):
+            raise ProviderError("The exact input diff version has invalid revision references")
+        await require_current_revision()
+        return {
+            "changes": changes,
+            "diff_refs": {
+                "head_sha": pr_info.head_sha,
+                "base_sha": data["base_commit_sha"],
+                "start_sha": data["start_commit_sha"],
+            },
+        }
+
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         try:
-            data = await self._changes(pr_info)
+            key = self._delivery_key(pr_info)
+            data = getattr(self, "_delivery_inputs", {}).get(key)
+            if data is not None:
+                data = data.review_inputs()
+            else:
+                data = await self._complete_review_inputs(pr_info)
+            text = _build_unified_diff(data["changes"])
+            from mira.core.diff_parser import parse_diff
+
+            parsed = parse_diff(text)
+            expected = {item["new_path"] for item in data["changes"]}
+            if (
+                len(parsed.files) != len(expected)
+                or {file.path for file in parsed.files} != expected
+            ):
+                raise ProviderError("The parsed MR diff does not cover every changed file")
+            if not hasattr(self, "_review_inputs"):
+                self._review_inputs = {}
+            self._review_inputs[key] = data
+            return text
         except ProviderError:
             raise
-        except Exception as e:
-            raise ProviderError(f"Failed to fetch MR diff: {e}") from e
-        return _build_unified_diff(data.get("changes", []))
+        except Exception as error:
+            raise ProviderError(f"Failed to fetch complete MR diff: {error}") from error
 
     async def get_compare_diff(self, pr_info: PRInfo, base_sha: str, head_sha: str) -> str:
         """Diff between two commits, for round 2+ incremental reviews."""
