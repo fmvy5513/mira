@@ -28,6 +28,7 @@ from mira.models import (
     WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
+    HunkInfo,
     KeyIssue,
     PRInfo,
     ReviewChunk,
@@ -2389,7 +2390,7 @@ class TestSecurityReviewPass:
         # Create enough files to trigger chunking with a tiny budget
         files = []
         for i in range(5):
-            hunk_content = f"+{'x' * 500}\n" * 10  # ~125 tokens per file
+            hunk_content = f"+{'x' * 50}\n" * 10  # ~125 tokens per file
             files.append(
                 FileDiff(
                     path=f"src/file{i}.py",
@@ -2397,7 +2398,7 @@ class TestSecurityReviewPass:
                     language="python",
                     added_lines=10,
                     deleted_lines=0,
-                    hunks=[SimpleNamespace(target_start=1, content=hunk_content)],
+                    hunks=[HunkInfo(1, 0, 1, 10, hunk_content)],
                 )
             )
 
@@ -2409,12 +2410,13 @@ class TestSecurityReviewPass:
 
         with patch("mira.core.passes.load_config") as mock_cfg:
             cfg = MiraConfig()
-            cfg.llm.max_context_tokens = 500  # tiny budget forces chunking
+            cfg.llm.max_context_tokens = 3200  # 400 tokens remain after prompt reservation
             mock_cfg.return_value = cfg
 
-            out = await security_review_pass(llm, files, files, "title")
+            out = await security_review_pass(llm, files, files, "title", security_llm=llm)
             assert out == []
-            # Should have been called more than once (multiple chunks)
+            assert not out.failures
+            # Complete hunks fit individually, but all files require multiple chunks.
             assert llm.complete_with_tools.call_count >= 2
 
 

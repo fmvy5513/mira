@@ -134,7 +134,7 @@ class DeliveryReviewMixin:
             data.get("head_commit_sha") != pr_info.head_sha
             or not isinstance(diffs, list)
             or data.get("overflow")
-            or data.get("state") == "overflow"
+            or data.get("state") != "collected"
             or any(d.get("too_large") or d.get("collapsed") for d in diffs)
             or not str(data.get("real_size", "")).isdigit()
             or int(data["real_size"]) != len(diffs)
@@ -216,18 +216,6 @@ class DeliveryReviewMixin:
             return
         if not isinstance(handle, GitLabDeliverySession):
             raise ProviderError("A GitLab delivery session is required")
-        current = (await self._request("GET", self._mr(pr_info))).json()
-        target = (
-            await self._request(
-                "GET",
-                f"{self._project(pr_info)}/repository/branches/{quote(pr_info.base_branch, safe='')}",
-            )
-        ).json()
-        current_revision = (
-            current.get("sha") == handle.source_sha
-            and current.get("target_branch") == pr_info.base_branch
-            and target.get("commit", {}).get("id") == handle.target_base_sha
-        )
         # Unknown discussion state fails closed; comments being resolved is not
         # independent proof that a code fix is correct. A full current review is still required.
         discussions = []
@@ -253,6 +241,18 @@ class DeliveryReviewMixin:
                 for note in discussion.get("notes", [])
             )
         ]
+        current = (await self._request("GET", self._mr(pr_info))).json()
+        target = (
+            await self._request(
+                "GET",
+                f"{self._project(pr_info)}/repository/branches/{quote(pr_info.base_branch, safe='')}",
+            )
+        ).json()
+        current_revision = (
+            current.get("sha") == handle.source_sha
+            and current.get("target_branch") == pr_info.base_branch
+            and target.get("commit", {}).get("id") == handle.target_base_sha
+        )
         facts = (
             eligibility(result, handle.changed_paths, current_revision, unresolved)
             if result is not None
@@ -274,11 +274,23 @@ class DeliveryReviewMixin:
         await self._request(
             "PUT", package, content=raw, headers={"Content-Type": "application/json"}
         )
+        current = (await self._request("GET", self._mr(pr_info))).json()
+        target = (
+            await self._request(
+                "GET",
+                f"{self._project(pr_info)}/repository/branches/{quote(pr_info.base_branch, safe='')}",
+            )
+        ).json()
+        publication_revision = (
+            current.get("sha") == handle.source_sha
+            and current.get("target_branch") == pr_info.base_branch
+            and target.get("commit", {}).get("id") == handle.target_base_sha
+        )
         await self._request(
             "POST",
             f"{self._project(pr_info)}/statuses/{handle.source_sha}",
             data={
-                "state": "success" if facts["eligible"] else "failed",
+                "state": "success" if facts["eligible"] and publication_revision else "failed",
                 "name": handle.context,
                 "pipeline_id": handle.pipeline_id,
                 "target_url": pr_info.url,

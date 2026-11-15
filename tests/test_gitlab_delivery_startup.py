@@ -27,6 +27,7 @@ def test_start_rejection_does_not_leave_pending_status(failure):
                     "head_commit_sha": "a" * 40,
                     "base_commit_sha": "b" * 40,
                     "real_size": "1",
+                    "state": "collected",
                     "overflow": failure == "overflow",
                     "diffs": [{"new_path": "a.py", "diff": "@@ -1 +1 @@\n-old\n+new"}],
                 }

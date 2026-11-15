@@ -584,6 +584,14 @@ async def security_review_pass(
         provider=sec_llm if hasattr(sec_llm, "count_tokens") else None,
     )
     if len(chunks) <= 1:
+        if chunks and chunks[0].incomplete_paths:
+            return PassResult(
+                failures=[
+                    _chunk_failure(
+                        chunks[0].files, "Security diff hunk exceeds the review token budget"
+                    )
+                ]
+            )
         outcome = await _security_scan_once(
             sec_llm,
             llm,
@@ -603,7 +611,14 @@ async def security_review_pass(
     )
     sem = asyncio.Semaphore(load_config().review.max_concurrent_chunks)
 
-    async def _bounded(chunk_files_list: list) -> _SecurityScanOutcome:
+    async def _bounded(chunk) -> _SecurityScanOutcome:
+        if chunk.incomplete_paths:
+            return _SecurityScanOutcome(
+                failure=_chunk_failure(
+                    chunk.files, "Security diff hunk exceeds the review token budget"
+                )
+            )
+        chunk_files_list = chunk.files
         async with sem:
             return await _security_scan_once(
                 sec_llm,
@@ -614,7 +629,7 @@ async def security_review_pass(
                 max_hops=max_hops,
             )
 
-    results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
+    results = await asyncio.gather(*[_bounded(c) for c in chunks])
     comments: list[ReviewComment] = []
     failures: list[ChunkFailure] = []
     for index, outcome in enumerate(results):

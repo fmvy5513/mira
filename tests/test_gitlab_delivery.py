@@ -107,6 +107,7 @@ def test_pinned_input_and_eligibility_status_are_machine_bound(
                     "base_commit_sha": "b" * 40,
                     "start_commit_sha": "b" * 40,
                     "real_size": "1",
+                    "state": "collected",
                     "diffs": [
                         {"new_path": "a.py", "old_path": "a.py", "diff": "@@ -1 +1 @@\n-old\n+new"}
                     ],
@@ -182,6 +183,7 @@ def test_incomplete_version_or_external_only_pipeline_cannot_start_gate(overflow
         "start_commit_sha": "b" * 40,
         "overflow": overflow,
         "real_size": "1",
+        "state": "collected",
         "diffs": [{"new_path": "a.py", "old_path": "a.py", "diff": "@@ -1 +1 @@\n-old\n+new"}],
     }
     replies = [
