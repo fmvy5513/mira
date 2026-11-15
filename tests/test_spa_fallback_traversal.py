@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ async def _raw_get(app, path: str) -> tuple[int, bytes]:
     """Drive the ASGI app with a raw path, the way `curl --path-as-is` does."""
     scope = {
         "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
         "method": "GET",
         "path": path,
         "raw_path": path.encode(),
@@ -23,15 +26,23 @@ async def _raw_get(app, path: str) -> tuple[int, bytes]:
     body = bytearray()
     status = {"code": 0}
     messages = [{"type": "http.request", "body": b"", "more_body": False}]
+    response_complete = asyncio.Event()
 
     async def receive():
-        return messages.pop(0)
+        if messages:
+            return messages.pop(0)
+        # A middleware disconnect listener may call receive again. Keep the
+        # client connected until the complete response has actually been sent.
+        await response_complete.wait()
+        return {"type": "http.disconnect"}
 
     async def send(message):
         if message["type"] == "http.response.start":
             status["code"] = message["status"]
         elif message["type"] == "http.response.body":
             body.extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                response_complete.set()
 
     await app(scope, receive, send)
     return status["code"], bytes(body)
@@ -73,3 +84,19 @@ async def test_real_asset_still_served(app) -> None:
     status, body = await _raw_get(app, "/app.js")
     assert status == 200
     assert body == b"REAL ASSET"
+
+
+def test_raw_get_supports_receive_after_the_request_body_is_consumed():
+    async def protocol_app(scope, receive, send):
+        assert (await receive())["type"] == "http.request"
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": b"OK", "more_body": False})
+        assert (await receive())["type"] == "http.disconnect"
+
+    coroutine = _raw_get(protocol_app, "/fixture")
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        assert completed.value == (200, b"OK")
+    else:
+        raise AssertionError("Completed protocol fixture unexpectedly requested real I/O")

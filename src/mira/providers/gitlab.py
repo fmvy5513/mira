@@ -28,6 +28,7 @@ from mira.models import (
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
 from mira.providers.formatting import format_comment_body, format_key_issues
+from mira.providers.gitlab_delivery import DeliveryReviewMixin
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _build_unified_diff(changes: list[dict[str, Any]]) -> str:
     return "".join(p if p.endswith("\n") else p + "\n" for p in parts)
 
 
-class GitLabProvider(BaseProvider):
+class GitLabProvider(DeliveryReviewMixin, BaseProvider):
     """GitLab code hosting provider (REST v4)."""
 
     def __init__(self, token: str) -> None:
@@ -209,6 +210,9 @@ class GitLabProvider(BaseProvider):
         return "none"
 
     async def _changes(self, pr_info: PRInfo) -> dict[str, Any]:
+        pinned = getattr(self, "_delivery_inputs", {}).get(self._delivery_key(pr_info))
+        if pinned is not None:
+            return {"diff_refs": pinned["diff_refs"], "changes": pinned["changes"]}
         resp = await self._request("GET", f"{self._mr(pr_info)}/changes")
         return resp.json()
 

@@ -815,12 +815,30 @@ class ReviewEngine:
         pr_info = await self.provider.get_pr_info(pr_url)
         self._pr_info = pr_info
 
+        delivery_handle = None
+        if not self.dry_run:
+            try:
+                delivery_handle = await self.provider.start_delivery_review(pr_info)
+            except Exception as exc:
+                logger.warning("Delivery review could not start: %s", type(exc).__name__)
+
+        async def finish_delivery(result: ReviewResult | None) -> None:
+            if delivery_handle is None:
+                return
+            try:
+                await self.provider.finish_delivery_review(pr_info, delivery_handle, result)
+            except Exception as exc:
+                # A missing eligibility status must block delivery, never become success.
+                logger.warning("Delivery review evidence could not publish: %s", type(exc).__name__)
+
         run_id = await self._start_check(pr_info)
         try:
             result = await self._review_pr(pr_info)
         except BaseException:
+            await finish_delivery(None)
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
+        await finish_delivery(result)
         await self._finish_check(pr_info, run_id, self._check_status_key(result), result)
         return result
 
@@ -917,7 +935,11 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
-        if review_round >= 2 and pr_info.head_sha:
+        if (
+            review_round >= 2
+            and pr_info.head_sha
+            and self.provider.requires_full_delivery_review(pr_info) is not True
+        ):
             try:
                 from mira.dashboard.api import _app_db
 

@@ -25,6 +25,17 @@ class BaseProvider(abc.ABC):
     # nicknames), command authorization matches ``user_id`` only, never the name.
     unique_usernames: bool = True
 
+    def requires_full_delivery_review(self, pr_info: PRInfo) -> bool:
+        return False
+
+    async def start_delivery_review(self, pr_info: PRInfo) -> dict | None:
+        return None
+
+    async def finish_delivery_review(
+        self, pr_info: PRInfo, handle: dict | None, result: ReviewResult | None
+    ) -> None:
+        return
+
     @abc.abstractmethod
     def __init__(self, token: str) -> None:
         """Configure the API client with an auth token."""

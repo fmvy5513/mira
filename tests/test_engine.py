@@ -140,6 +140,11 @@ def mock_llm(sample_llm_response_text: str) -> LLMProvider:
 @pytest.fixture
 def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider = AsyncMock()
+    # Match BaseProvider's synchronous opt-in hook; an unrestricted AsyncMock
+    # fabricates an un-awaited coroutine for this otherwise synchronous query.
+    provider.requires_full_delivery_review = MagicMock(return_value=False)
+    provider.start_delivery_review = AsyncMock(return_value=None)
+    provider.finish_delivery_review = AsyncMock(return_value=None)
     provider.get_pr_info.return_value = PRInfo(
         title="Test PR",
         description="Test description",
@@ -1439,6 +1444,9 @@ class TestDryRun:
         verify_response = json.dumps({"results": [{"id": "T1", "fixed": True}]})
 
         provider = AsyncMock()
+        provider.requires_full_delivery_review = MagicMock(return_value=False)
+        provider.start_delivery_review = AsyncMock(return_value=None)
+        provider.finish_delivery_review = AsyncMock(return_value=None)
         provider.get_pr_info.return_value = PRInfo(
             title="Test PR",
             description="Test description",
@@ -1549,6 +1557,9 @@ class TestThreadResolution:
         self, sample_diff_text: str, threads: list[UnresolvedThread]
     ) -> AsyncMock:
         provider = AsyncMock()
+        provider.requires_full_delivery_review = MagicMock(return_value=False)
+        provider.start_delivery_review = AsyncMock(return_value=None)
+        provider.finish_delivery_review = AsyncMock(return_value=None)
         provider.get_pr_info.return_value = PRInfo(
             title="Test PR",
             description="Test description",
@@ -1620,6 +1631,16 @@ class TestThreadResolution:
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
         llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
+
+        async def complete_tools(messages, tools, temperature=None, force_tool=None):
+            tool = force_tool or tools[0]["function"]["name"]
+            if tool == "submit_review":
+                return sample_llm_response_text
+            # Keep criticism explicitly unscripted rather than returning an
+            # AsyncMock object where the provider protocol requires JSON text.
+            raise RuntimeError(f"{tool} is not scripted in this fixture")
+
+        llm.complete_with_tools = AsyncMock(side_effect=complete_tools)
 
         config = MiraConfig()
         config.review.auto_resolve_conversations = False
