@@ -815,12 +815,30 @@ class ReviewEngine:
         pr_info = await self.provider.get_pr_info(pr_url)
         self._pr_info = pr_info
 
+        delivery_handle = None
+        if not self.dry_run:
+            try:
+                delivery_handle = await self.provider.start_delivery_review(pr_info)
+            except Exception as exc:
+                logger.warning("Delivery review could not start: %s", type(exc).__name__)
+
+        async def finish_delivery(result: ReviewResult | None) -> None:
+            if delivery_handle is None:
+                return
+            try:
+                await self.provider.finish_delivery_review(pr_info, delivery_handle, result)
+            except Exception as exc:
+                # A missing eligibility status must block delivery, never become success.
+                logger.warning("Delivery review evidence could not publish: %s", type(exc).__name__)
+
         run_id = await self._start_check(pr_info)
         try:
             result = await self._review_pr(pr_info)
         except BaseException:
+            await finish_delivery(None)
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
+        await finish_delivery(result)
         await self._finish_check(pr_info, run_id, self._check_status_key(result), result)
         return result
 
@@ -891,6 +909,7 @@ class ReviewEngine:
         # round 1 onto never-reviewed files, so it stays round 1 (full
         # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_full_delivery = self.provider.requires_full_delivery_review(pr_info) is True
         is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
@@ -899,7 +918,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads and not is_review_rest:
+                if all_bot_threads and not is_review_rest and not is_full_delivery:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -908,7 +927,7 @@ class ReviewEngine:
                         "description": short_thread_description(t.body),
                     }
                     for t in all_bot_threads
-                    if t.is_resolved
+                    if t.is_resolved and not is_full_delivery
                 ]
         except Exception as exc:
             logger.warning("Failed to compute review round: %s", exc)
@@ -917,7 +936,11 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
-        if review_round >= 2 and pr_info.head_sha:
+        if (
+            review_round >= 2
+            and pr_info.head_sha
+            and self.provider.requires_full_delivery_review(pr_info) is not True
+        ):
             try:
                 from mira.dashboard.api import _app_db
 
@@ -1001,6 +1024,29 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
+            exclusion_hook = getattr(type(self.provider), "get_unreviewable_paths", None)
+            if callable(exclusion_hook):
+                excluded = set(exclusion_hook(self.provider, pr_info))
+                if excluded:
+                    result.skipped_paths = sorted(set(result.skipped_paths) | excluded)
+                    result.total_paths = sorted(set(result.total_paths) | excluded)
+                    result.reviewed_paths = [
+                        path for path in result.reviewed_paths if path not in excluded
+                    ]
+                    result.reviewed_files = len(result.reviewed_paths)
+                    notice = (
+                        "Metadata-only changed paths were verified but not source-reviewed: "
+                        + ", ".join(f"`{path}`" for path in sorted(excluded))
+                        + "."
+                    )
+                    result.summary = (result.summary + "\n\n" + notice).strip()
+                    if result.walkthrough is not None:
+                        result.walkthrough.summary = (
+                            result.walkthrough.summary + "\n\n" + notice
+                        ).strip()
+                    result.audit.append(
+                        {"stage": "metadata_unreviewable", "paths": sorted(excluded)}
+                    )
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
@@ -1730,6 +1776,20 @@ class ReviewEngine:
             idx: int,
             chunk: ReviewChunk,
         ) -> _ChunkOutcome:
+            if idx >= self.config.review.max_chunks_per_review:
+                return _ChunkOutcome(
+                    failure=_chunk_failure(
+                        idx, chunk, "Review chunk budget exceeded; this fragment was not reviewed"
+                    )
+                )
+            if chunk.incomplete_paths:
+                return _ChunkOutcome(
+                    failure=_chunk_failure(
+                        idx,
+                        chunk,
+                        "Input budget exceeded by a complete hunk; this file was not fully reviewed",
+                    )
+                )
             raw_response = ""
             hops: int | None = None
             async with semaphore:

@@ -625,6 +625,8 @@ class ReviewChunk:
 
     files: list[FileDiff] = field(default_factory=list)
     token_estimate: int = 0
+    # Whole hunks retained but too large to send safely; engine records failure.
+    incomplete_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

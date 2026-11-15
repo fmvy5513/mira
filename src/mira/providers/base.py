@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Literal
 
 from mira.models import (
@@ -18,12 +19,35 @@ CheckConclusion = Literal["success", "failure", "neutral"]
 CHECK_RUN_NAME = "Mira"
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeliveryReviewSession:
+    """Provider-owned session bound to immutable review input revisions."""
+
+    source_sha: str
+    target_base_sha: str
+
+
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
     # Whether a username identifies exactly one account. When False (Bitbucket
     # nicknames), command authorization matches ``user_id`` only, never the name.
     unique_usernames: bool = True
+
+    def get_unreviewable_paths(self, pr_info: PRInfo) -> list[str]:
+        """Verified input metadata that was not source-reviewed."""
+        return []
+
+    def requires_full_delivery_review(self, pr_info: PRInfo) -> bool:
+        return False
+
+    async def start_delivery_review(self, pr_info: PRInfo) -> DeliveryReviewSession | None:
+        return None
+
+    async def finish_delivery_review(
+        self, pr_info: PRInfo, handle: DeliveryReviewSession | None, result: ReviewResult | None
+    ) -> None:
+        return
 
     @abc.abstractmethod
     def __init__(self, token: str) -> None:

@@ -220,6 +220,7 @@ _WALKTHROUGH_RESPONSE = (
 def _make_pr_provider() -> AsyncMock:
     """Provider mock for a full review_pr run, incl. description read/write."""
     provider = AsyncMock()
+    provider.requires_full_delivery_review = MagicMock(return_value=False)
     provider.get_pr_info.return_value = PRInfo(
         title="Test PR",
         description="Author description.",

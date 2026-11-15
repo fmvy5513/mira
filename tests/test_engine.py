@@ -28,6 +28,7 @@ from mira.models import (
     WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
+    HunkInfo,
     KeyIssue,
     PRInfo,
     ReviewChunk,
@@ -140,6 +141,11 @@ def mock_llm(sample_llm_response_text: str) -> LLMProvider:
 @pytest.fixture
 def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider = AsyncMock()
+    # Match BaseProvider's synchronous opt-in hook; an unrestricted AsyncMock
+    # fabricates an un-awaited coroutine for this otherwise synchronous query.
+    provider.requires_full_delivery_review = MagicMock(return_value=False)
+    provider.start_delivery_review = AsyncMock(return_value=None)
+    provider.finish_delivery_review = AsyncMock(return_value=None)
     provider.get_pr_info.return_value = PRInfo(
         title="Test PR",
         description="Test description",
@@ -319,9 +325,10 @@ class TestReviewEngine:
         llm.complete = AsyncMock(return_value=good_response)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        # Force two chunks by setting a very low token limit
+        # Reserve the 2,000-token prompt overhead, then fit one complete file
+        # (~73 measured tokens including path overhead) per 100-token chunk.
         config = MiraConfig()
-        config.llm.max_context_tokens = 100
+        config.llm.max_context_tokens = 2100
         config.filter.confidence_threshold = 0.0
 
         engine = ReviewEngine(config=config, llm=llm)
@@ -329,6 +336,8 @@ class TestReviewEngine:
 
         # Should still have comments from the successful chunk
         assert result.reviewed_files > 0
+        assert review_call_count >= 2
+        assert result.failed_paths
         # The pipeline completed without raising
 
     @pytest.mark.asyncio
@@ -949,7 +958,7 @@ class TestReviewEngine:
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         config = MiraConfig()
-        config.llm.max_context_tokens = 100  # Force multiple chunks
+        config.llm.max_context_tokens = 2100  # 2,000 overhead + room for one complete file
         config.filter.confidence_threshold = 0.0
 
         engine = ReviewEngine(config=config, llm=llm)
@@ -1439,6 +1448,9 @@ class TestDryRun:
         verify_response = json.dumps({"results": [{"id": "T1", "fixed": True}]})
 
         provider = AsyncMock()
+        provider.requires_full_delivery_review = MagicMock(return_value=False)
+        provider.start_delivery_review = AsyncMock(return_value=None)
+        provider.finish_delivery_review = AsyncMock(return_value=None)
         provider.get_pr_info.return_value = PRInfo(
             title="Test PR",
             description="Test description",
@@ -1549,6 +1561,9 @@ class TestThreadResolution:
         self, sample_diff_text: str, threads: list[UnresolvedThread]
     ) -> AsyncMock:
         provider = AsyncMock()
+        provider.requires_full_delivery_review = MagicMock(return_value=False)
+        provider.start_delivery_review = AsyncMock(return_value=None)
+        provider.finish_delivery_review = AsyncMock(return_value=None)
         provider.get_pr_info.return_value = PRInfo(
             title="Test PR",
             description="Test description",
@@ -1620,6 +1635,16 @@ class TestThreadResolution:
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
         llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
+
+        async def complete_tools(messages, tools, temperature=None, force_tool=None):
+            tool = force_tool or tools[0]["function"]["name"]
+            if tool == "submit_review":
+                return sample_llm_response_text
+            # Keep criticism explicitly unscripted rather than returning an
+            # AsyncMock object where the provider protocol requires JSON text.
+            raise RuntimeError(f"{tool} is not scripted in this fixture")
+
+        llm.complete_with_tools = AsyncMock(side_effect=complete_tools)
 
         config = MiraConfig()
         config.review.auto_resolve_conversations = False
@@ -2365,7 +2390,7 @@ class TestSecurityReviewPass:
         # Create enough files to trigger chunking with a tiny budget
         files = []
         for i in range(5):
-            hunk_content = f"+{'x' * 500}\n" * 10  # ~125 tokens per file
+            hunk_content = f"+{'x' * 50}\n" * 10  # ~125 tokens per file
             files.append(
                 FileDiff(
                     path=f"src/file{i}.py",
@@ -2373,7 +2398,7 @@ class TestSecurityReviewPass:
                     language="python",
                     added_lines=10,
                     deleted_lines=0,
-                    hunks=[SimpleNamespace(target_start=1, content=hunk_content)],
+                    hunks=[HunkInfo(1, 0, 1, 10, hunk_content)],
                 )
             )
 
@@ -2385,12 +2410,13 @@ class TestSecurityReviewPass:
 
         with patch("mira.core.passes.load_config") as mock_cfg:
             cfg = MiraConfig()
-            cfg.llm.max_context_tokens = 500  # tiny budget forces chunking
+            cfg.llm.max_context_tokens = 3200  # 400 tokens remain after prompt reservation
             mock_cfg.return_value = cfg
 
-            out = await security_review_pass(llm, files, files, "title")
+            out = await security_review_pass(llm, files, files, "title", security_llm=llm)
             assert out == []
-            # Should have been called more than once (multiple chunks)
+            assert not out.failures
+            # Complete hunks fit individually, but all files require multiple chunks.
             assert llm.complete_with_tools.call_count >= 2
 
 
