@@ -7,7 +7,8 @@ import json
 import os
 import re
 import uuid
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from mira.exceptions import ProviderError
@@ -61,6 +62,8 @@ class GitLabDeliverySession(DeliveryReviewSession):
     diff_refs: dict[str, str]
     changes: list[dict]
     changed_paths: list[str]
+    source_changes: list[dict] | None = None
+    unreviewable_paths: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if any(
@@ -77,7 +80,14 @@ class GitLabDeliverySession(DeliveryReviewSession):
             raise ProviderError("Incomplete delivery session")
 
     def review_inputs(self) -> dict:
-        return {"diff_refs": self.diff_refs, "changes": self.changes}
+        return {
+            "diff_refs": deepcopy(self.diff_refs),
+            "changes": deepcopy(self.changes),
+            "source_changes": deepcopy(
+                self.changes if self.source_changes is None else self.source_changes
+            ),
+            "unreviewable_paths": list(self.unreviewable_paths),
+        }
 
 
 class DeliveryReviewMixin:
@@ -146,6 +156,7 @@ class DeliveryReviewMixin:
             not isinstance(path, str) or not path for path in changed_paths
         ):
             raise ProviderError("The input diff paths are incomplete")
+        partition = await self._partition_review_changes(pr_info, diffs, data["base_commit_sha"])
         response = (
             await self._request(
                 "POST",
@@ -177,6 +188,8 @@ class DeliveryReviewMixin:
                 },
                 changes=diffs,
                 changed_paths=changed_paths,
+                source_changes=partition["source_changes"],
+                unreviewable_paths=partition["unreviewable_paths"],
             )
         except Exception:
             await self._request(

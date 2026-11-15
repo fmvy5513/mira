@@ -283,28 +283,49 @@ class GitLabProvider(DeliveryReviewMixin, BaseProvider):
             for field in ("base_commit_sha", "start_commit_sha")
         ):
             raise ProviderError("The exact input diff version has invalid revision references")
-        metadata_paths = []
-        empty_changes = [item for item in changes if not item["diff"].strip()]
-        if len(empty_changes) > 20:
-            raise ProviderError("Too many metadata-only files to verify within a bounded review")
-        try:
-            async with asyncio.timeout(30):
-                for item in empty_changes:
-                    if not await self._verify_metadata_only(pr_info, item, data["base_commit_sha"]):
-                        raise ProviderError("Empty diff has no verified metadata-only explanation")
-                    metadata_paths.append(item["new_path"])
-        except TimeoutError as error:
-            raise ProviderError("Metadata-only diff verification exceeded its deadline") from error
+        partition = await self._partition_review_changes(pr_info, changes, data["base_commit_sha"])
         await require_current_revision()
         return {
             "changes": changes,
-            "source_changes": [item for item in changes if item["diff"].strip()],
-            "unreviewable_paths": metadata_paths,
+            **partition,
             "diff_refs": {
                 "head_sha": pr_info.head_sha,
                 "base_sha": data["base_commit_sha"],
                 "start_sha": data["start_commit_sha"],
             },
+        }
+
+    async def _partition_review_changes(
+        self, pr_info: PRInfo, changes: list[dict], base_sha: str
+    ) -> dict:
+        """Apply the same bounded metadata proof to normal and delivery inputs."""
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("diff"), str)
+            or item.get("collapsed")
+            or item.get("too_large")
+            or not isinstance(item.get("new_path"), str)
+            or not item["new_path"]
+            for item in changes
+        ):
+            raise ProviderError("The input diff is incomplete before metadata partition")
+        metadata_paths = []
+        empty_changes = [item for item in changes if not item["diff"].strip()]
+        if len(empty_changes) > 20:
+            raise ProviderError("Too many metadata-only files to verify within a bounded review")
+        if not empty_changes:
+            return {"source_changes": list(changes), "unreviewable_paths": []}
+        try:
+            async with asyncio.timeout(30):
+                for item in empty_changes:
+                    if not await self._verify_metadata_only(pr_info, item, base_sha):
+                        raise ProviderError("Empty diff has no verified metadata-only explanation")
+                    metadata_paths.append(item["new_path"])
+        except TimeoutError as error:
+            raise ProviderError("Metadata-only diff verification exceeded its deadline") from error
+        return {
+            "source_changes": [item for item in changes if item["diff"].strip()],
+            "unreviewable_paths": metadata_paths,
         }
 
     async def _pinned_blob_metadata(self, pr_info: PRInfo, path: str, ref: str) -> tuple[str, int]:
