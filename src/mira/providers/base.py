@@ -34,6 +34,10 @@ class BaseProvider(abc.ABC):
     # nicknames), command authorization matches ``user_id`` only, never the name.
     unique_usernames: bool = True
 
+    def get_unreviewable_paths(self, pr_info: PRInfo) -> list[str]:
+        """Verified input metadata that was not source-reviewed."""
+        return []
+
     def requires_full_delivery_review(self, pr_info: PRInfo) -> bool:
         return False
 

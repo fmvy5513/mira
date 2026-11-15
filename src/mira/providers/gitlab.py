@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -269,7 +269,6 @@ class GitLabProvider(DeliveryReviewMixin, BaseProvider):
                 or item.get("collapsed")
                 or item.get("too_large")
                 or not isinstance(item.get("diff"), str)
-                or not item["diff"].strip()
                 or not isinstance(item.get("new_path"), str)
                 or not item["new_path"]
                 for item in changes
@@ -284,15 +283,94 @@ class GitLabProvider(DeliveryReviewMixin, BaseProvider):
             for field in ("base_commit_sha", "start_commit_sha")
         ):
             raise ProviderError("The exact input diff version has invalid revision references")
+        metadata_paths = []
+        empty_changes = [item for item in changes if not item["diff"].strip()]
+        if len(empty_changes) > 20:
+            raise ProviderError("Too many metadata-only files to verify within a bounded review")
+        try:
+            async with asyncio.timeout(30):
+                for item in empty_changes:
+                    if not await self._verify_metadata_only(pr_info, item, data["base_commit_sha"]):
+                        raise ProviderError("Empty diff has no verified metadata-only explanation")
+                    metadata_paths.append(item["new_path"])
+        except TimeoutError as error:
+            raise ProviderError("Metadata-only diff verification exceeded its deadline") from error
         await require_current_revision()
         return {
             "changes": changes,
+            "source_changes": [item for item in changes if item["diff"].strip()],
+            "unreviewable_paths": metadata_paths,
             "diff_refs": {
                 "head_sha": pr_info.head_sha,
                 "base_sha": data["base_commit_sha"],
                 "start_sha": data["start_commit_sha"],
             },
         }
+
+    async def _pinned_blob_metadata(self, pr_info: PRInfo, path: str, ref: str) -> tuple[str, int]:
+        response = await self._request(
+            "HEAD", f"{self._project(pr_info)}/repository/files/{quote(path, safe='')}?ref={ref}"
+        )
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        blob = headers.get("x-gitlab-blob-id", "")
+        size = headers.get("x-gitlab-size", "")
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob)
+            or not size.isdigit()
+            or headers.get("x-gitlab-ref") != ref
+            or headers.get("x-gitlab-commit-id") != ref
+            or unquote(headers.get("x-gitlab-file-path", "")) != path
+        ):
+            raise ProviderError("Metadata-only file lacks immutable GitLab blob identity")
+        return blob, int(size)
+
+    async def _read_binary_prefix(self, pr_info: PRInfo, path: str, ref: str) -> bytes:
+        """Bound the streamed probe even when GitLab ignores the Range header."""
+        url = f"{self._project(pr_info)}/repository/files/{quote(path, safe='')}/raw?ref={ref}"
+        async with (
+            httpx.AsyncClient(timeout=10, follow_redirects=False) as client,
+            client.stream(
+                "GET", url, headers={"PRIVATE-TOKEN": self._token, "Range": "bytes=0-7999"}
+            ) as response,
+        ):
+            if response.status_code not in (200, 206):
+                raise ProviderError("Unable to verify the metadata-only binary file")
+            async for chunk in response.aiter_bytes(chunk_size=8000):
+                return chunk[:8000]
+        return b""
+
+    async def _verify_metadata_only(self, pr_info: PRInfo, item: dict, base_sha: str) -> bool:
+        sides = []
+        if item.get("new_file") is not True:
+            old_path = item.get("old_path")
+            if not isinstance(old_path, str) or not old_path:
+                return False
+            sides.append((old_path, base_sha))
+        if item.get("deleted_file") is not True:
+            sides.append((item["new_path"], pr_info.head_sha))
+        if not sides:
+            return False
+        blobs = [await self._pinned_blob_metadata(pr_info, path, ref) for path, ref in sides]
+        if len(blobs) == 1 and blobs[0][1] == 0:
+            return True
+        is_rename = item.get("renamed_file") is True and item.get("old_path") != item["new_path"]
+        is_mode_change = (
+            item.get("a_mode") in {"100644", "100755", "120000", "160000"}
+            and item.get("b_mode") in {"100644", "100755", "120000", "160000"}
+            and item["a_mode"] != item["b_mode"]
+        )
+        if len(blobs) == 2 and blobs[0][0] == blobs[1][0] and (is_rename or is_mode_change):
+            return True
+        if item.get("is_binary") is True:
+            return True
+        for (path, ref), (_, size) in zip(sides, blobs, strict=True):
+            if size and b"\x00" in await self._read_binary_prefix(pr_info, path, ref):
+                return True
+        return False
+
+    def get_unreviewable_paths(self, pr_info: PRInfo) -> list[str]:
+        data = getattr(self, "_review_inputs", {}).get(self._delivery_key(pr_info), {})
+        return list(data.get("unreviewable_paths", []))
 
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         try:
@@ -302,16 +380,21 @@ class GitLabProvider(DeliveryReviewMixin, BaseProvider):
                 data = data.review_inputs()
             else:
                 data = await self._complete_review_inputs(pr_info)
-            text = _build_unified_diff(data["changes"])
+            source_changes = data.get("source_changes", data["changes"])
+            text = _build_unified_diff(source_changes)
             from mira.core.diff_parser import parse_diff
 
             parsed = parse_diff(text)
-            expected = {item["new_path"] for item in data["changes"]}
+            expected = {item["new_path"] for item in source_changes}
             if (
                 len(parsed.files) != len(expected)
                 or {file.path for file in parsed.files} != expected
             ):
                 raise ProviderError("The parsed MR diff does not cover every changed file")
+            data["unreviewable_paths"] = sorted(
+                set(data.get("unreviewable_paths", []))
+                | {file.path for file in parsed.files if file.is_binary}
+            )
             if not hasattr(self, "_review_inputs"):
                 self._review_inputs = {}
             self._review_inputs[key] = data

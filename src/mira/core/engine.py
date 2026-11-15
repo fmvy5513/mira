@@ -1024,6 +1024,29 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
+            exclusion_hook = getattr(type(self.provider), "get_unreviewable_paths", None)
+            if callable(exclusion_hook):
+                excluded = set(exclusion_hook(self.provider, pr_info))
+                if excluded:
+                    result.skipped_paths = sorted(set(result.skipped_paths) | excluded)
+                    result.total_paths = sorted(set(result.total_paths) | excluded)
+                    result.reviewed_paths = [
+                        path for path in result.reviewed_paths if path not in excluded
+                    ]
+                    result.reviewed_files = len(result.reviewed_paths)
+                    notice = (
+                        "Metadata-only changed paths were verified but not source-reviewed: "
+                        + ", ".join(f"`{path}`" for path in sorted(excluded))
+                        + "."
+                    )
+                    result.summary = (result.summary + "\n\n" + notice).strip()
+                    if result.walkthrough is not None:
+                        result.walkthrough.summary = (
+                            result.walkthrough.summary + "\n\n" + notice
+                        ).strip()
+                    result.audit.append(
+                        {"stage": "metadata_unreviewable", "paths": sorted(excluded)}
+                    )
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
