@@ -421,6 +421,10 @@ async def test_repo_tree_preserves_ref_across_pages(monkeypatch, fetcher, ref):
             headers = {}
             if len(requests) == 1:
                 next_url = request.url.copy_set_param("page_token", "cursor+&next")
+                # GitLab echoes route parameters and pagination defaults in its Link header.
+                next_url = next_url.copy_merge_params(
+                    {"id": "example/app", "page": "1", "with_last_commit": "false"}
+                )
                 headers["link"] = f'<{next_url}>; rel="next"'
             return httpx.Response(200, json=entries, headers=headers)
         return httpx.Response(
@@ -470,6 +474,9 @@ class TestGitLabTreePagination:
             {"recursive": "false"},
             {"per_page": "1"},
             {"pagination": "offset"},
+            {"id": "other/project"},
+            {"page": "2"},
+            {"with_last_commit": "true"},
             {"path": "subdir"},
             {"ref": None},
         ],
