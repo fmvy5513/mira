@@ -322,12 +322,20 @@ class GitLabRepoFetcher:
                         endpoint.path,
                     ) or target.userinfo:
                         raise IncompleteTreeError("Invalid repository tree pagination target")
+                    # GitLab may echo the route ID and default options in keyset links.
+                    expected = endpoint.params
+                    defaults = {"id": f"{owner}/{repo}", "page": "1", "with_last_commit": "false"}
+                    for key, value in defaults.items():
+                        if key in target.params:
+                            expected = expected.set(key, value)
+                    cursors = target.params.get_list("page_token")
                     if (
-                        target.params.remove("page_token") != endpoint.params
-                        or len(target.params.get_list("page_token")) != 1
-                        or not target.params["page_token"]
+                        target.params.remove("page_token") != expected
+                        or len(cursors) != 1
+                        or not cursors[0]
                     ):
                         raise IncompleteTreeError("Repository tree pagination query changed")
+                    url = str(endpoint.copy_set_param("page_token", cursors[0]))
         return paths
 
     async def file_content(
