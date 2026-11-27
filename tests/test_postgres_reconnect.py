@@ -8,7 +8,7 @@ transparently on that error without adding per-query liveness probes.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from unittest.mock import patch
 
 import psycopg
@@ -240,3 +240,79 @@ def test_refresh_conn_replaces_stale_handle() -> None:
     assert live.conn_id == 2
     assert live is not connections[0]
     assert connections[0].closed
+
+
+@contextmanager
+def _flaky_connections(fail_on: set[int]):
+    """Like _fake_connections, but connect attempts whose 1-based number is in
+    ``fail_on`` raise — the server is still in crash recovery."""
+    connections: list[_FakeConnection] = []
+    attempts = {"n": 0}
+
+    def factory(url: str) -> _FakeConnection:
+        attempts["n"] += 1
+        if attempts["n"] in fail_on:
+            raise psycopg.OperationalError("the database system is in recovery mode")
+        conn = _FakeConnection(len(connections) + 1)
+        connections.append(conn)
+        return conn
+
+    with patch("mira.db.postgres.connect", side_effect=factory):
+        yield connections
+
+
+def test_app_database_login_recovers_after_failed_reconnect() -> None:
+    """Production 2026-11-27: Postgres crash-restarted, the reconnect attempt
+    hit it mid-recovery and failed, and every later login 500'd with
+    'the connection is closed' (raised by conn.cursor()) until a restart."""
+    with _flaky_connections(fail_on={2}) as connections:
+        with patch.object(AppDatabase, "_ensure_default_admin", lambda self: None):
+            db = AppDatabase("postgresql://example/db", admin_password="admin")
+
+        connections[0].kill()
+        # The server is still recovering; this one request may fail.
+        with suppress(psycopg.OperationalError):
+            db.authenticate("admin", "admin")
+
+        user = db.authenticate("admin", "admin")
+
+    assert user is not None
+    assert len(connections) == 2
+
+
+def test_app_database_replaces_handle_closed_before_cursor() -> None:
+    """A handle psycopg already marked closed must not reach conn.cursor()."""
+    with _fake_connections() as connections:
+        with patch.object(AppDatabase, "_ensure_default_admin", lambda self: None):
+            db = AppDatabase("postgresql://example/db", admin_password="admin")
+
+        connections[0].close()
+        user = db.authenticate("admin", "admin")
+
+    assert user is not None
+    assert len(connections) == 2
+
+
+def test_app_database_raw_helpers_recover_from_closed_handle() -> None:
+    """_rows/_exec used to call self._pg_conn.cursor() directly."""
+    with _fake_connections() as connections:
+        with patch.object(AppDatabase, "_ensure_default_admin", lambda self: None):
+            db = AppDatabase("postgresql://example/db", admin_password="admin")
+
+        connections[0].close()
+        assert db._rows("SELECT x FROM t WHERE a = ?", (1,)) == []
+        db._exec("UPDATE t SET a = ? WHERE b = ?", (1, 2))
+
+    assert len(connections) == 2
+
+
+def test_pg_store_replaces_handle_closed_before_cursor() -> None:
+    _reset_pg_store()
+    with _fake_connections() as connections:
+        store = pg_store.PgIndexStore("owner", "repo", "postgresql://example/db")
+        connections[0].close()
+        assert store.get_summary("warmup.py") is not None
+        store.set_learned_rule_active(1, True)
+
+    assert len(connections) == 2
+    assert not connections[1].closed

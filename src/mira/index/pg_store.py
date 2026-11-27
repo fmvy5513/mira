@@ -265,12 +265,14 @@ def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
     with _lock:
-        from mira.db.postgres import connect
+        from mira.db.postgres import connect, is_closed
 
-        if _pg_conn is None:
-            _pg_conn = connect(url)
+        conn = _pg_conn
+        if conn is None or is_closed(conn):
+            # A handle psycopg already marked closed is replaced, not reused.
+            conn = _pg_conn = connect(url)
         if not _schema_initialized:
-            with _pg_conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
                 # Lightweight migration for columns added post-schema.
                 cur.execute(
@@ -294,20 +296,19 @@ def _get_conn(url: str) -> Any:
                     "TEXT NOT NULL DEFAULT ''"
                 )
             _schema_initialized = True
-        return _pg_conn
+        return conn
 
 
 @contextmanager
 def _pg_cursor(url: str) -> Iterator[Any]:
     """Yield a cursor that reconnects once on stale-connection errors."""
-    from mira.db.postgres import ReconnectingCursor
+    from mira.db.postgres import open_cursor
 
     def refresh() -> Any:
         _drop_pg_conn()
         return _get_conn(url)
 
-    conn = _get_conn(url)
-    with ReconnectingCursor(conn.cursor(), on_reconnect=refresh) as cur:
+    with open_cursor(_get_conn(url), refresh) as cur:
         yield cur
 
 
@@ -558,11 +559,9 @@ class PgIndexStore(_StoreSharedMixin):
     @contextmanager
     def _cursor(self) -> Iterator[Any]:
         """Cursor on the current shared connection; reconnects once on idle drop."""
-        from mira.db.postgres import ReconnectingCursor
+        from mira.db.postgres import open_cursor
 
-        with ReconnectingCursor(
-            _get_conn(self._url).cursor(), on_reconnect=self._refresh_conn
-        ) as cur:
+        with open_cursor(_get_conn(self._url), self._refresh_conn) as cur:
             yield cur
 
     def _commit(self) -> None:

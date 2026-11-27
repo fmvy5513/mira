@@ -25,6 +25,35 @@ def reconnect(url: str, conn: Any | None) -> Any:
     return connect(url)
 
 
+def is_closed(conn: Any | None) -> bool:
+    """True when there is no handle or psycopg has marked it closed.
+
+    psycopg sets ``closed`` once the socket is gone (server restart, crash
+    recovery, idle drop), and from then on ``conn.cursor()`` itself raises —
+    before any retry wrapper can see the error.
+    """
+    return conn is None or bool(getattr(conn, "closed", False))
+
+
+def open_cursor(conn: Any | None, on_reconnect: Callable[[], Any]) -> ReconnectingCursor:
+    """Open a ``ReconnectingCursor``, replacing a closed handle first.
+
+    Creating the cursor is part of the retry: a handle left closed by an
+    earlier failure (e.g. a reconnect attempted while the server was still in
+    crash recovery) is replaced instead of failing every later request until
+    the process restarts. No liveness query is sent.
+    """
+    import psycopg
+
+    if conn is None or is_closed(conn):
+        conn = on_reconnect()
+    try:
+        cur = conn.cursor()
+    except psycopg.OperationalError:
+        cur = on_reconnect().cursor()
+    return ReconnectingCursor(cur, on_reconnect=on_reconnect)
+
+
 class ReconnectingCursor:
     """Cursor wrapper that reconnects once when the DB raises OperationalError."""
 
