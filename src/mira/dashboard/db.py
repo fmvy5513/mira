@@ -658,24 +658,31 @@ class AppDatabase:
     @contextmanager
     def _pg_cursor(self) -> Iterator[Any]:
         """Yield a Postgres cursor that reconnects once on stale-connection errors."""
-        from mira.db.postgres import ReconnectingCursor, connect, reconnect
+        from mira.db.postgres import open_cursor, reconnect
 
         def refresh() -> Any:
             with self._pg_lock:
-                self._pg_conn = reconnect(self._url, self._pg_conn)
+                stale, self._pg_conn = self._pg_conn, None
+                # If connect fails (server still recovering), _pg_conn stays
+                # None so the next request connects afresh instead of reusing
+                # the closed handle forever.
+                self._pg_conn = reconnect(self._url, stale)
                 return self._pg_conn
 
         with self._pg_lock:
-            if self._pg_conn is None:
-                self._pg_conn = connect(self._url)
             conn = self._pg_conn
-        with ReconnectingCursor(conn.cursor(), on_reconnect=refresh) as cur:
+        with open_cursor(conn, refresh) as cur:
             yield cur
 
     def _pg_commit(self) -> None:
+        from mira.db.postgres import is_closed
+
         with self._pg_lock:
-            if self._pg_conn is not None:
-                self._pg_conn.commit()
+            # Connections are autocommit; a closed handle has nothing to commit
+            # and must not turn a finished write into an error.
+            conn = self._pg_conn
+            if conn is not None and not is_closed(conn):
+                conn.commit()
 
     def _ensure_default_admin(self) -> None:
         """Create the initial admin user if none exists. Never uses a fixed default
@@ -1669,8 +1676,7 @@ class AppDatabase:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             return self._sqlite_conn.execute(sql, params).fetchall()
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(sql.replace("?", "%s"), params)
             return cur.fetchall()
 
@@ -1682,10 +1688,9 @@ class AppDatabase:
             self._sqlite_conn.execute(sql, params)
             self._sqlite_conn.commit()
             return
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(sql.replace("?", "%s"), params)
-        self._pg_conn.commit()
+        self._pg_commit()
 
     def upsert_contributor(
         self,
@@ -1727,8 +1732,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO contributors "
                     "(provider, external_login, external_id, display_name, avatar_url, is_bot, created_at, updated_at) "
@@ -1872,15 +1876,14 @@ class AppDatabase:
                 self._sqlite_conn.execute(update_sql.format(p="?"), upd)
             self._sqlite_conn.commit()
             return inserted
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(insert_sql.format(p="%s"), insert_params)
             inserted = cur.rowcount == 1
             if inserted:
                 cur.execute(rollup_sql.format(p="%s"), (contributor_id, day))
             else:
                 cur.execute(update_sql.format(p="%s"), update_params)
-        self._pg_conn.commit()
+        self._pg_commit()
         return inserted
 
     def record_contribution_for_login(
