@@ -26,6 +26,8 @@ function applyTheme(theme: string) {
   root.classList.add(theme)
 }
 
+const LOGIN_TIMEOUT_MS = 20_000
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
@@ -46,19 +48,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = async (username: string, password: string): Promise<string | null> => {
-    const res = await fetch(`${API_BASE}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ username, password }),
-    })
-    const data = await res.json()
-    if (res.ok && data.user) {
+    // Never leave the form spinning: a hung server, a dropped connection or a
+    // non-JSON error page from the reverse proxy (e.g. 502 while the container
+    // restarts) all surface as a message instead of an endless "Signing in...".
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(`${API_BASE}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, password }),
+        signal: controller.signal,
+      })
+    } catch (err) {
+      return controller.signal.aborted
+        ? `The server did not respond within ${LOGIN_TIMEOUT_MS / 1000} seconds. Please try again shortly.`
+        : `Could not reach the server: ${err instanceof Error ? err.message : String(err)}`
+    } finally {
+      window.clearTimeout(timer)
+    }
+    let data: { user?: AuthUser; error?: string } | null = null
+    try {
+      data = await res.json()
+    } catch {
+      // Not JSON: usually a proxy error page while the backend is down.
+    }
+    if (res.ok && data?.user) {
       setUser(data.user)
       applyTheme(data.user.theme)
       return null
     }
-    return data.error || "Login failed"
+    if (data?.error) return data.error
+    return res.ok ? "Login failed" : `Login failed: the server returned HTTP ${res.status}.`
   }
 
   const logout = async () => {
