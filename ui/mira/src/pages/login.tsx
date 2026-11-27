@@ -37,9 +37,14 @@ export function LoginPage() {
     e.preventDefault()
     setError(null)
     setSubmitting(true)
-    const err = await login(username, password)
-    if (err) setError(err)
-    setSubmitting(false)
+    try {
+      const err = await login(username, password)
+      if (err) setError(err)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed")
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
