@@ -58,32 +58,7 @@ class TestDBColumn:
     def test_migration_adds_column_to_existing_db(self, tmp_path: Path):
         # A DB created before the column existed (plain sqlite3, schema from
         # before the feature) must gain the column on open.
-        raw = tmp_path / "legacy.db"
-        conn = sqlite3.connect(raw)
-        conn.executescript(
-            """
-            CREATE TABLE repos (
-                platform TEXT NOT NULL DEFAULT 'github',
-                owner TEXT NOT NULL,
-                repo TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                index_mode TEXT NOT NULL DEFAULT 'full',
-                files_indexed INTEGER NOT NULL DEFAULT 0,
-                file_count_estimate INTEGER NOT NULL DEFAULT 0,
-                error TEXT NOT NULL DEFAULT '',
-                installation_id INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL DEFAULT 0,
-                updated_at REAL NOT NULL DEFAULT 0,
-                last_indexed_at REAL NOT NULL DEFAULT 0,
-                conventions TEXT NOT NULL DEFAULT '',
-                private INTEGER,
-                PRIMARY KEY (platform, owner, repo)
-            );
-            INSERT INTO repos (owner, repo) VALUES ('legacy', 'repo');
-            """
-        )
-        conn.commit()
-        conn.close()
+        raw = _legacy_db(tmp_path)
 
         db = AppDatabase(url=str(raw), admin_password="admin")
         cols = {r[1] for r in db._sqlite_conn.execute("PRAGMA table_info(repos)")}
@@ -91,6 +66,67 @@ class TestDBColumn:
         record = db.get_repo("legacy", "repo")
         assert record is not None
         assert record.base_branch_policy == ""
+
+    def test_concurrent_initializers_both_upgrade_legacy_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Two workers open the same legacy DB together: both probe the schema
+        # before either adds the column. The second ALTER must not fail.
+        raw = _legacy_db(tmp_path)
+        alter = "ALTER TABLE repos ADD COLUMN base_branch_policy"
+
+        class RacingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql.startswith(alter):
+                    other = connect(raw)
+                    other.execute(sql)  # the other worker wins the race
+                    other.commit()
+                    other.close()
+                return super().execute(sql, *args)
+
+        connect = sqlite3.connect
+        monkeypatch.setattr(
+            "mira.dashboard.db.sqlite3.connect",
+            lambda *a, **kw: connect(*a, factory=RacingConnection, **kw),
+        )
+
+        db = AppDatabase(url=str(raw), admin_password="admin")
+        cols = [r[1] for r in db._sqlite_conn.execute("PRAGMA table_info(repos)")]
+        assert cols.count("base_branch_policy") == 1
+        record = db.get_repo("legacy", "repo")
+        assert record is not None
+        assert record.base_branch_policy == ""
+
+
+def _legacy_db(tmp_path: Path) -> Path:
+    """A database created before the base_branch_policy column existed."""
+    raw = tmp_path / "legacy.db"
+    conn = sqlite3.connect(raw)
+    conn.executescript(
+        """
+        CREATE TABLE repos (
+            platform TEXT NOT NULL DEFAULT 'github',
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            index_mode TEXT NOT NULL DEFAULT 'full',
+            files_indexed INTEGER NOT NULL DEFAULT 0,
+            file_count_estimate INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            installation_id INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0,
+            last_indexed_at REAL NOT NULL DEFAULT 0,
+            conventions TEXT NOT NULL DEFAULT '',
+            private INTEGER,
+            PRIMARY KEY (platform, owner, repo)
+        );
+        INSERT INTO repos (owner, repo) VALUES ('legacy', 'repo');
+        """
+    )
+    conn.commit()
+    conn.close()
+    return raw
 
 
 class TestParsePolicy:

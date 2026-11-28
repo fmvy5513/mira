@@ -52,8 +52,10 @@ async def run_incremental_index(
         ref = default_branch
         tree_paths = None
         try:
-            if removed_paths:
-                # Resolve the current head after claiming so a newer run can fence its writes.
+            if removed_paths or full_reindex:
+                # Resolve the current head after claiming so a newer run can fence its
+                # writes, and so a full tree and the reads that follow describe one
+                # revision even if the branch advances meanwhile.
                 ref = await fetcher.branch_head(owner, repo, default_branch)
             if removed_paths or full_reindex:
                 tree_paths = await fetcher.repo_tree(owner, repo, ref)

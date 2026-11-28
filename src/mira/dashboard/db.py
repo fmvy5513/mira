@@ -546,9 +546,19 @@ class AppDatabase:
             # records the real visibility.
             self._sqlite_conn.execute("ALTER TABLE repos ADD COLUMN private INTEGER")
         if "base_branch_policy" not in cols:
-            self._sqlite_conn.execute(
-                "ALTER TABLE repos ADD COLUMN base_branch_policy TEXT NOT NULL DEFAULT ''"
-            )
+            try:
+                self._sqlite_conn.execute(
+                    "ALTER TABLE repos ADD COLUMN base_branch_policy TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                # Another initializer upgrading the same database may have added
+                # the column between the probe above and this ALTER. Tolerate
+                # exactly that outcome; re-raise anything else.
+                current = {
+                    r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(repos)").fetchall()
+                }
+                if "base_branch_policy" not in current:
+                    raise
         progress_cols = {
             r[1]
             for r in self._sqlite_conn.execute("PRAGMA table_info(pr_review_progress)").fetchall()

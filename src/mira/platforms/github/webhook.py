@@ -49,6 +49,16 @@ _PR_ACTIONS = {"opened", "synchronize", "reopened"}
 _PR_MERGE_ACTIONS = {"closed"}
 
 
+def _base_retargeted(action: str, payload: dict[str, Any]) -> bool:
+    """Whether an ``edited`` pull_request event moved the PR to another base branch.
+
+    GitHub reports a retarget as ``edited`` with ``changes.base``; a title or
+    description edit carries only ``changes.title`` / ``changes.body``.
+    """
+    changes = payload.get("changes")
+    return action == "edited" and isinstance(changes, dict) and "base" in changes
+
+
 class TaskScheduler(Protocol):
     """Where the dispatcher hands the work it decides to do.
 
@@ -495,7 +505,8 @@ async def dispatch_github_event(
         background_tasks.add_task(handle_pr_merged, payload, app_auth, bot_name)
         return "processing"
 
-    if event == "pull_request" and action in _PR_ACTIONS:
+    retargeted = event == "pull_request" and _base_retargeted(action, payload)
+    if event == "pull_request" and (action in _PR_ACTIONS or retargeted):
         sender = payload.get("sender", {}).get("login", "")
         if sender == f"{bot_name}[bot]":
             logger.debug("Ignoring pull_request event from self (%s)", sender)
@@ -548,7 +559,15 @@ async def dispatch_github_event(
         if any(lbl.get("name") == PAUSE_LABEL for lbl in pr_labels):
             logger.info("PR paused via %s label", PAUSE_LABEL)
             return "paused"
-        background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name)
+        if retargeted:
+            # The head may be unchanged, so the review must not narrow itself
+            # to the commits since the last reviewed SHA: the diff against the
+            # new base is what has not been reviewed.
+            background_tasks.add_task(
+                handle_pull_request, payload, app_auth, bot_name, full_diff=True
+            )
+        else:
+            background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name)
         return "processing"
 
     if event == "issue_comment" and action == "created":
@@ -612,8 +631,15 @@ async def handle_pull_request(
     payload: dict[str, Any],
     app_auth: GitHubAppAuth,
     bot_name: str,
+    *,
+    full_diff: bool = False,
 ) -> None:
-    """Handle a pull_request event by running a full review."""
+    """Handle a pull_request event by running a full review.
+
+    ``full_diff`` reviews the whole PR diff even when a later round would
+    otherwise review only the commits since the last reviewed head (a PR
+    retargeted to a new base).
+    """
     installation_id: int = payload.get("installation", {}).get("id", 0)
     pr_url = ""
     repo_full = ""
@@ -643,6 +669,7 @@ async def handle_pull_request(
             is_private,
             bot_name,
             pr_title=pr.get("title", ""),
+            full_diff=full_diff,
         )
     except Exception as exc:
         logger.exception("Error handling pull_request event")
