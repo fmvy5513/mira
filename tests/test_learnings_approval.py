@@ -307,3 +307,37 @@ def test_admin_can_edit_anyones_rule(patched_db: AppDatabase):
     store = IndexStore.open("acme", "web")
     assert store.get_learned_rule(created.id).rule_text == "admin edited"
     store.close()
+
+
+def test_rejection_after_read_still_blocks_resynthesis(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    store = IndexStore.open("acme", "web")
+    rule = store.upsert_learned_rule("first wording", "reject_pattern", "style", "", 3)
+    real = store._conn
+
+    class RejectAfterRead:
+        """Records the admin's rejection just after synthesis reads the status."""
+
+        def execute(self, sql, params=()):
+            result = real.execute(sql, params)
+            if sql.startswith("SELECT id, status FROM learned_rules"):
+                result = list(result.fetchall())
+                real.execute(
+                    "UPDATE learned_rules SET status = 'rejected' WHERE id = ?", (rule.id,)
+                )
+                real.commit()
+                return type("Rows", (), {"fetchone": lambda _self: result[0] if result else None})()
+            return result
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    store._conn = RejectAfterRead()
+    try:
+        again = store.upsert_learned_rule("new wording", "reject_pattern", "style", "", 9)
+    finally:
+        store._conn = real
+    assert (again.id, again.rule_text, again.status) == (rule.id, "first wording", "rejected")
+    kept = store.get_learned_rule(rule.id)
+    assert (kept.rule_text, kept.sample_count, kept.status) == ("first wording", 3, "rejected")
+    store.close()

@@ -174,6 +174,18 @@ class RepoBaseBranchPolicy(BaseModel):
     branches: list[str] = Field(default_factory=list)
 
 
+class RepoBranchPolicyResponse(RepoBaseBranchPolicy):
+    """Branch policy plus the exact registry record it belongs to.
+
+    The same ``owner/repo`` can be registered on several platforms, each with
+    its own policy, so the response names the platform it was read from and
+    every platform that registers the slug.
+    """
+
+    platform: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+
+
 class RepoDetail(BaseModel):
     owner: str
     repo: str

@@ -231,6 +231,28 @@ async def test_large_push_indexes_the_pinned_tree(index_store):
     assert fetcher.refs and set(fetcher.refs) == {CURRENT}
 
 
+async def test_large_changed_only_push_pins_the_tree_and_reads(index_store):
+    """A cap-triggered full re-index with no removals reads one pinned revision."""
+    fetcher = Fetcher(current_files())
+    await push(fetcher, [], ["keep.py", *(f"changed-{n}.py" for n in range(51))])
+    assert index_store.all_paths() == {"keep.py"}
+    assert fetcher.refs and set(fetcher.refs) == {CURRENT}
+
+
+async def test_reconciliation_without_removals_pins_the_tree_and_reads(index_store):
+    """A pending recovery compares the full tree; it must not read a moving branch."""
+    broken = Fetcher(current_files())
+    broken.repo_tree = AsyncMock(side_effect=IncompleteTreeError("Incomplete synthetic tree"))
+    await push(broken, ["gone.py"], ["keep.py"])
+    assert index_store.claim_index_run().needs_reconciliation
+
+    fetcher = Fetcher(current_files())
+    await push(fetcher, [], ["keep.py"])
+    assert index_store.all_paths() == {"keep.py"}
+    assert fetcher.refs and set(fetcher.refs) == {CURRENT}
+    assert not index_store.claim_index_run().needs_reconciliation
+
+
 async def test_delayed_head_lookup_cannot_delete_newer_index(index_store):
     entered, release = asyncio.Event(), asyncio.Event()
     older = Fetcher({}, revision=OLDER, pause=(entered, release))

@@ -89,14 +89,28 @@ async def _register_and_index_repo(platform: str, env_token: str, body: BaseMode
         except Exception as exc:
             try:
                 with store.index_write(run) if store is not None and run else nullcontext():
+                    error = str(exc)
                     if isinstance(exc, IndexingRecoveryPending):
-                        status = "indexing"
+                        # This task ends here and nothing retries it, so the
+                        # repository is not "indexing". Report a retryable
+                        # failure; the store keeps its pending marker, so the
+                        # retry still reconciles the unfinished index.
+                        status = "failed"
+                        error = f"Indexing stopped before the index was reconciled. Retry. {exc}"
                     else:
                         status = "empty" if isinstance(exc, EmptyRepoError) else "failed"
                     _api._app_db.set_repo_status(
-                        owner, repo, status, error=str(exc), platform=platform
+                        owner, repo, status, error=error, platform=platform
                     )
-                    if status == "failed":
+                    if isinstance(exc, IndexingRecoveryPending):
+                        logger.warning(
+                            "%s index recovery for %s/%s ended unfinished: %s",
+                            platform.title(),
+                            owner,
+                            repo,
+                            exc,
+                        )
+                    elif status == "failed":
                         logger.exception(
                             "%s indexing failed for %s/%s", platform.title(), owner, repo
                         )

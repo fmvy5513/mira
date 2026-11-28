@@ -143,3 +143,60 @@ def test_badge_reads_the_index_of_the_record_it_authorized(db: AppDatabase) -> N
     db.set_repo_visibility("acme", "web", False)
     _badge("acme", "web")
     assert [(r.owner, r.repo, r.platform) for r in opened] == [("acme", "web", "github")]
+
+
+def _edges(monkeypatch: pytest.MonkeyPatch, *pairs: tuple[str, str]) -> None:
+    class _Edges:
+        def resolve_edges(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(source_repo=s, target_repo=t) for s, t in pairs]
+
+    @contextmanager
+    def open_relationships():
+        yield _Edges()
+
+    monkeypatch.setattr(repos, "_open_relationships", open_relationships)
+
+
+def test_prefix_url_does_not_show_the_private_prefixed_repos_dependents(
+    db: AppDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reverse of the collision above: the URL decodes to a public Forgejo repo,
+    # while the raw URL name is a private GitLab repo with a public dependent.
+    db.register_repo("_forgejo/acme", "web", installation_id=1, platform="gitlab")
+    db.set_repo_visibility("_forgejo/acme", "web", True, platform="gitlab")
+    db.register_repo("acme", "web", installation_id=1, platform="forgejo")
+    db.set_repo_visibility("acme", "web", False, platform="forgejo")
+    db.set_repo_visibility("acme", "web", False)  # the github record too
+    _edges(monkeypatch, ("acme/public-client", "_forgejo/acme/web"))
+
+    svg, _ = _badge("_forgejo/acme", "web")
+
+    assert "core.py" in svg
+    assert "public-client" not in svg
+
+
+def test_anonymous_edges_need_every_record_of_the_name_public(
+    db: AppDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Edges carry no platform, so a name shared with a private record is ambiguous.
+    db.set_repo_visibility("acme", "web", False)
+    db.register_repo("acme", "web", installation_id=1, platform="gitlab")
+    db.set_repo_visibility("acme", "web", True, platform="gitlab")
+    _edges(monkeypatch, ("acme/public-client", "acme/web"))
+
+    anonymous, _ = _badge("acme", "web")
+    signed_in, _ = _badge("acme", "web", User(id=2, username="bob", is_admin=False))
+
+    assert "public-client" not in anonymous
+    assert "public-client" in signed_in
+
+
+def test_signed_in_edges_match_the_registry_name_not_the_url_prefix(
+    db: AppDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db.register_repo("acme", "web", installation_id=1, platform="forgejo")
+    _edges(monkeypatch, ("acme/public-client", "acme/web"))
+
+    svg, _ = _badge("_forgejo/acme", "web", User(id=2, username="bob", is_admin=False))
+
+    assert "public-client" in svg

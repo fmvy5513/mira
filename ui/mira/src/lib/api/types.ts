@@ -34,6 +34,13 @@ export interface BaseBranchPolicy {
   branches: string[]
 }
 
+/** A branch policy as the policy endpoints return it: the registry platform
+ *  it was read from or written to, and every platform registering the slug. */
+export interface BranchPolicyRecord extends BaseBranchPolicy {
+  platform?: string | null
+  platforms?: string[]
+}
+
 export interface RepoDetail {
   owner: string
   repo: string

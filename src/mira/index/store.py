@@ -400,8 +400,14 @@ def _manifest_packages_for_write(
         version = pkg["version"] if keep_versions else ""
         key = (kind, pkg["name"], version)
         previous = rows.pop(key, None) if replace_order or keep_versions else rows.get(key)
-        if version and previous is not None and previous.get("scan_eligible", True):
-            pkg = {**pkg, "scan_eligible": True}
+        if version and previous is not None:
+            # One lockfile can install the same version several times. The
+            # merged row is scannable if any copy is, and dev-only only if
+            # every copy is.
+            if previous.get("scan_eligible", True):
+                pkg = {**pkg, "scan_eligible": True}
+            if not previous.get("is_dev"):
+                pkg = {**pkg, "is_dev": False}
         rows[key] = pkg
     return list(rows.values())
 
@@ -1502,19 +1508,19 @@ class IndexStore(_StoreSharedMixin):
         if existing:
             # Keep the existing approval status — re-synthesis (more samples)
             # must never silently re-activate a rejected rule or auto-approve.
-            if existing[1] == "rejected":
-                # An admin rejected this rule: leave their decision, and the
-                # text they rejected, untouched rather than re-describing it
-                # under the same verdict.
-                rejected = self.get_learned_rule(existing[0])
-                if rejected is not None:
-                    return rejected
-            self._conn.execute(
+            # An admin rejection leaves their decision, and the text they
+            # rejected, untouched. The guard is in the UPDATE itself, so a
+            # rejection recorded after the read above still wins.
+            cur = self._conn.execute(
                 "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
-                "sample_count = ?, updated_at = ? WHERE id = ?",
+                "sample_count = ?, updated_at = ? WHERE id = ? AND status != 'rejected'",
                 (rule_text, source_signal, sample_count, now, existing[0]),
             )
             self._conn.commit()
+            if cur.rowcount == 0:
+                current = self.get_learned_rule(existing[0])
+                if current is not None:
+                    return current
             return LearnedRuleRow(
                 id=existing[0],
                 rule_text=rule_text,

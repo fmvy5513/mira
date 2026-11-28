@@ -130,6 +130,34 @@ async def test_handle_pr_event(
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
 
 
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+@pytest.mark.parametrize("full_diff", [True, False])
+async def test_handle_pr_event_full_diff_reaches_the_engine(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    full_diff: bool,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """A retarget review tells the engine not to narrow to the latest commits."""
+    mock_config.return_value = MagicMock()
+    mock_engine = MagicMock()
+    mock_engine.review_pr = AsyncMock(return_value=ReviewResult(summary="ok"))
+    mock_engine_cls.return_value = mock_engine
+
+    with patch("mira.dashboard.api._app_db"):
+        await handle_pull_request(
+            _make_pr_payload(), mock_app_auth, "mira-bot", full_diff=full_diff
+        )
+
+    assert (getattr(mock_engine, "_force_full_diff", None) is True) is full_diff
+    mock_engine.review_pr.assert_awaited_once()
+
+
 # ── Outbound webhook dispatch wiring ─────────────────────────────────────────
 
 

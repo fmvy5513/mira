@@ -58,32 +58,7 @@ class TestDBColumn:
     def test_migration_adds_column_to_existing_db(self, tmp_path: Path):
         # A DB created before the column existed (plain sqlite3, schema from
         # before the feature) must gain the column on open.
-        raw = tmp_path / "legacy.db"
-        conn = sqlite3.connect(raw)
-        conn.executescript(
-            """
-            CREATE TABLE repos (
-                platform TEXT NOT NULL DEFAULT 'github',
-                owner TEXT NOT NULL,
-                repo TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                index_mode TEXT NOT NULL DEFAULT 'full',
-                files_indexed INTEGER NOT NULL DEFAULT 0,
-                file_count_estimate INTEGER NOT NULL DEFAULT 0,
-                error TEXT NOT NULL DEFAULT '',
-                installation_id INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL DEFAULT 0,
-                updated_at REAL NOT NULL DEFAULT 0,
-                last_indexed_at REAL NOT NULL DEFAULT 0,
-                conventions TEXT NOT NULL DEFAULT '',
-                private INTEGER,
-                PRIMARY KEY (platform, owner, repo)
-            );
-            INSERT INTO repos (owner, repo) VALUES ('legacy', 'repo');
-            """
-        )
-        conn.commit()
-        conn.close()
+        raw = _legacy_db(tmp_path)
 
         db = AppDatabase(url=str(raw), admin_password="admin")
         cols = {r[1] for r in db._sqlite_conn.execute("PRAGMA table_info(repos)")}
@@ -91,6 +66,67 @@ class TestDBColumn:
         record = db.get_repo("legacy", "repo")
         assert record is not None
         assert record.base_branch_policy == ""
+
+    def test_concurrent_initializers_both_upgrade_legacy_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Two workers open the same legacy DB together: both probe the schema
+        # before either adds the column. The second ALTER must not fail.
+        raw = _legacy_db(tmp_path)
+        alter = "ALTER TABLE repos ADD COLUMN base_branch_policy"
+
+        class RacingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql.startswith(alter):
+                    other = connect(raw)
+                    other.execute(sql)  # the other worker wins the race
+                    other.commit()
+                    other.close()
+                return super().execute(sql, *args)
+
+        connect = sqlite3.connect
+        monkeypatch.setattr(
+            "mira.dashboard.db.sqlite3.connect",
+            lambda *a, **kw: connect(*a, factory=RacingConnection, **kw),
+        )
+
+        db = AppDatabase(url=str(raw), admin_password="admin")
+        cols = [r[1] for r in db._sqlite_conn.execute("PRAGMA table_info(repos)")]
+        assert cols.count("base_branch_policy") == 1
+        record = db.get_repo("legacy", "repo")
+        assert record is not None
+        assert record.base_branch_policy == ""
+
+
+def _legacy_db(tmp_path: Path) -> Path:
+    """A database created before the base_branch_policy column existed."""
+    raw = tmp_path / "legacy.db"
+    conn = sqlite3.connect(raw)
+    conn.executescript(
+        """
+        CREATE TABLE repos (
+            platform TEXT NOT NULL DEFAULT 'github',
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            index_mode TEXT NOT NULL DEFAULT 'full',
+            files_indexed INTEGER NOT NULL DEFAULT 0,
+            file_count_estimate INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            installation_id INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0,
+            last_indexed_at REAL NOT NULL DEFAULT 0,
+            conventions TEXT NOT NULL DEFAULT '',
+            private INTEGER,
+            PRIMARY KEY (platform, owner, repo)
+        );
+        INSERT INTO repos (owner, repo) VALUES ('legacy', 'repo');
+        """
+    )
+    conn.commit()
+    conn.close()
+    return raw
 
 
 class TestParsePolicy:
@@ -176,3 +212,57 @@ class TestEndpoints:
         with pytest.raises(HTTPException) as exc:
             set_branch_policy("ghost", "repo", body, _admin_request())  # noqa: SLF001
         assert exc.value.status_code == 404
+
+
+class TestSameSlugOnTwoPlatforms:
+    """One owner/repo registered on GitHub and GitLab has two policies."""
+
+    @pytest.fixture
+    def two(self, db: AppDatabase, monkeypatch):
+        db.register_repo("o", "r", platform="github")
+        db.register_repo("o", "r", platform="gitlab")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        return db
+
+    def test_get_names_platform_and_all_platforms(self, two: AppDatabase):
+        policy = get_branch_policy("o", "r")
+        assert policy.platform == "github"
+        assert policy.platforms == ["github", "gitlab"]
+        assert get_branch_policy("o", "r", platform="gitlab").platform == "gitlab"
+
+    def test_put_without_platform_is_refused(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        with pytest.raises(HTTPException) as exc:
+            set_branch_policy("o", "r", body, _admin_request())
+        assert exc.value.status_code == 409
+        assert two.get_repo("o", "r", platform="github").base_branch_policy == ""
+        assert two.get_repo("o", "r", platform="gitlab").base_branch_policy == ""
+
+    def test_put_edits_only_the_named_platform(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        saved = set_branch_policy("o", "r", body, _admin_request(), platform="gitlab")
+        assert saved.platform == "gitlab"
+        assert get_branch_policy("o", "r", platform="gitlab").mode == "disable"
+        assert get_branch_policy("o", "r", platform="github").mode == "inherit"
+
+        body = SimpleNamespace(mode="override", branches=["main"])
+        set_branch_policy("o", "r", body, _admin_request(), platform="github")
+        assert get_branch_policy("o", "r", platform="github").mode == "override"
+        assert get_branch_policy("o", "r", platform="gitlab").mode == "disable"
+
+    def test_unregistered_platform_404s(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        with pytest.raises(HTTPException) as exc:
+            set_branch_policy("o", "r", body, _admin_request(), platform="forgejo")
+        assert exc.value.status_code == 404
+        with pytest.raises(HTTPException) as exc:
+            get_branch_policy("o", "r", platform="forgejo")
+        assert exc.value.status_code == 404
+
+    def test_single_platform_put_needs_no_platform(self, db: AppDatabase, monkeypatch):
+        db.register_repo("g", "r", platform="gitlab")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        body = SimpleNamespace(mode="disable", branches=[])
+        saved = set_branch_policy("g", "r", body, _admin_request())
+        assert saved.platform == "gitlab"
+        assert get_branch_policy("g", "r").mode == "disable"

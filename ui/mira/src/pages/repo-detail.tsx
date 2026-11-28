@@ -25,7 +25,12 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
-import { api, type BaseBranchPolicy, type ReviewContextModel } from "@/lib/api"
+import {
+  api,
+  type BaseBranchPolicy,
+  type BranchPolicyRecord,
+  type ReviewContextModel,
+} from "@/lib/api"
 import { describeApiError } from "@/lib/api/http"
 import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
@@ -138,17 +143,30 @@ function RepoDetailPageContent({
   const [indexing, setIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState("")
   const [cancelling, setCancelling] = useState(false)
+  // Whether the poller has seen this repo's job since indexing started. A job
+  // the tracker discards (superseded by a push) then disappears from the
+  // status list; before it first appears, its absence means nothing.
+  const sawIndexJobRef = useRef(false)
 
-  // Auto-review destination-branch policy for this repo.
-  const [policy, setPolicy] = useState<BaseBranchPolicy | null>(null)
+  // Auto-review destination-branch policy for this repo. The same owner/repo
+  // can be registered on several platforms, each with its own policy, so the
+  // form is keyed by platform too. `policyPlatform` is the platform the user
+  // picked (null = the server's default record); `policy.platform` is the
+  // record actually loaded, and saves target exactly that record.
+  const [policy, setPolicy] = useState<BranchPolicyRecord | null>(null)
+  const [policyPlatform, setPolicyPlatform] = useState<string | null>(null)
   const [policyLoadError, setPolicyLoadError] = useState(false)
   const [savingPolicy, setSavingPolicy] = useState(false)
   const [policySaved, setPolicySaved] = useState(false)
   const [policyError, setPolicyError] = useState("")
   const [policyBranchesDraft, setPolicyBranchesDraft] = useState("")
-  // Tracks the repo currently rendered, so async policy callbacks (GET/PUT
-  // responses, timers) can detect that the user has moved to another repo.
+  // Tracks the repo + platform currently rendered, so async policy callbacks
+  // (GET/PUT responses, timers) can detect that the user has moved on.
   const currentRepoRef = useRef("")
+  // The policy key a PUT is in flight for. A ref, not state: a second Enter
+  // before React re-renders must still see the first save.
+  const savingPolicyForRef = useRef<string | null>(null)
+  const policyKey = `${owner}/${repo}#${policyPlatform ?? ""}`
 
   // Keyed by owner/repo: a late response for a previous repo must not
   // populate the form, and navigating repos resets the draft.
@@ -156,6 +174,7 @@ function RepoDetailPageContent({
   if (policyRepo !== `${owner}/${repo}`) {
     setPolicyRepo(`${owner}/${repo}`)
     setPolicy(null)
+    setPolicyPlatform(null)
     setPolicyLoadError(false)
     setPolicyBranchesDraft("")
     setSavingPolicy(false)
@@ -165,9 +184,9 @@ function RepoDetailPageContent({
   useEffect(() => {
     if (!owner || !repo) return
     let cancelled = false
-    currentRepoRef.current = `${owner}/${repo}`
+    currentRepoRef.current = `${owner}/${repo}#${policyPlatform ?? ""}`
     api
-      .getBranchPolicy(owner, repo)
+      .getBranchPolicy(owner, repo, policyPlatform)
       .then((p) => {
         if (cancelled) return
         setPolicy(p)
@@ -179,16 +198,32 @@ function RepoDetailPageContent({
     return () => {
       cancelled = true
     }
-  }, [owner, repo])
+  }, [owner, repo, policyPlatform])
 
   const setPolicyMode = (mode: BaseBranchPolicy["mode"]) => {
+    if (savingPolicyForRef.current === policyKey) return
     setPolicy((prev) => (prev ? { ...prev, mode } : prev))
+  }
+
+  const choosePolicyPlatform = (platform: string) => {
+    if (savingPolicyForRef.current === policyKey) return
+    if (platform === (policy?.platform ?? policyPlatform)) return
+    setPolicyPlatform(platform)
+    setPolicy(null)
+    setPolicyLoadError(false)
+    setPolicyBranchesDraft("")
+    setPolicySaved(false)
+    setPolicyError("")
   }
 
   const savePolicy = async () => {
     if (!owner || !repo || !policy) return
-    // A PUT resolving after repo navigation must not touch the new repo's form.
-    const savedFor = `${owner}/${repo}`
+    // A PUT resolving after repo/platform navigation must not touch the new
+    // form. One save at a time: the form is locked until it settles, so the
+    // response cannot overwrite edits made while it was in flight.
+    const savedFor = policyKey
+    if (savingPolicyForRef.current === savedFor) return
+    savingPolicyForRef.current = savedFor
     setSavingPolicy(true)
     setPolicyError("")
     try {
@@ -199,7 +234,13 @@ function RepoDetailPageContent({
               .map((b) => b.trim())
               .filter(Boolean)
           : []
-      const saved = await api.saveBranchPolicy(owner, repo, policy.mode, branches)
+      const saved = await api.saveBranchPolicy(
+        owner,
+        repo,
+        policy.mode,
+        branches,
+        policy.platform ?? policyPlatform,
+      )
       if (currentRepoRef.current !== savedFor) return
       setPolicy(saved)
       setPolicyBranchesDraft(saved.branches.join(", "))
@@ -211,6 +252,7 @@ function RepoDetailPageContent({
       if (currentRepoRef.current !== savedFor) return
       setPolicyError(err instanceof Error ? err.message : "Failed to save")
     } finally {
+      if (savingPolicyForRef.current === savedFor) savingPolicyForRef.current = null
       if (currentRepoRef.current === savedFor) setSavingPolicy(false)
     }
   }
@@ -225,25 +267,40 @@ function RepoDetailPageContent({
         const jobs = await api.getIndexingStatus()
         const job = jobs.find((j) => j.repo === `${owner}/${repo}`)
         if (cancelled) return
-        if (job && job.status === "indexing") {
+        if (!job) {
+          // The tracker discarded a job we had seen (a push superseded it):
+          // nothing will report a terminal status, so stop waiting and
+          // refresh the repo's status.
+          if (indexing && sawIndexJobRef.current) {
+            sawIndexJobRef.current = false
+            setIndexing(false)
+            setCancelling(false)
+            setIndexStatus("")
+            setTimeout(() => window.location.reload(), 1000)
+          }
+        } else if (job.status === "indexing") {
+          sawIndexJobRef.current = true
           setIndexing(true)
           setIndexStatus(
             job.files_done > 0
               ? `Indexing... ${job.files_done} files processed`
               : "Indexing...",
           )
-        } else if (job && job.status === "completed") {
+        } else if (job.status === "completed") {
+          sawIndexJobRef.current = false
           setIndexStatus(`Done — ${job.files_done} files indexed`)
           if (indexing) {
             setIndexing(false)
             setCancelling(false)
             setTimeout(() => window.location.reload(), 1000)
           }
-        } else if (job && job.status === "failed") {
+        } else if (job.status === "failed") {
+          sawIndexJobRef.current = false
           setIndexStatus(`Failed: ${job.error}`)
           setIndexing(false)
           setCancelling(false)
-        } else if (job && job.status === "cancelled") {
+        } else if (job.status === "cancelled") {
+          sawIndexJobRef.current = false
           setIndexStatus(`Cancelled — ${job.files_done} files indexed before stopping`)
           setIndexing(false)
           setCancelling(false)
@@ -263,6 +320,8 @@ function RepoDetailPageContent({
 
   const triggerIndex = async (full: boolean) => {
     if (!owner || !repo) return
+    // A new job: wait for it to appear before reading its absence as a discard.
+    sawIndexJobRef.current = false
     setIndexing(true)
     setCancelling(false)
     setIndexStatus(full ? "Starting full re-index..." : "Starting index update...")
@@ -593,6 +652,29 @@ function RepoDetailPageContent({
                 )
               ) : (
                 <>
+                  {(policy.platforms?.length ?? 0) > 1 && (
+                    <div className="space-y-1">
+                      <label className="flex items-center gap-2 text-sm font-medium">
+                        Platform
+                        <select
+                          className="rounded-md border bg-background px-2 py-1 text-sm"
+                          value={policy.platform ?? policyPlatform ?? ""}
+                          onChange={(e) => choosePolicyPlatform(e.target.value)}
+                          disabled={savingPolicy}
+                        >
+                          {policy.platforms?.map((p) => (
+                            <option key={p} value={p}>
+                              {p}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="text-xs text-muted-foreground">
+                        This repository is registered on more than one
+                        platform. Each platform has its own policy.
+                      </p>
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <label className="flex items-center gap-2 text-sm font-medium">
                       <input
@@ -600,6 +682,7 @@ function RepoDetailPageContent({
                         name="branch-policy-mode"
                         checked={policy.mode === "inherit"}
                         onChange={() => setPolicyMode("inherit")}
+                        disabled={savingPolicy}
                         className="size-4 accent-primary"
                       />
                       Inherit deployment default
@@ -622,6 +705,7 @@ function RepoDetailPageContent({
                         name="branch-policy-mode"
                         checked={policy.mode === "override"}
                         onChange={() => setPolicyMode("override")}
+                        disabled={savingPolicy}
                         className="size-4 accent-primary"
                       />
                       Only these destination branches
@@ -631,9 +715,9 @@ function RepoDetailPageContent({
                       placeholder='e.g. main, dev*, release/*'
                       value={policyBranchesDraft}
                       onChange={(e) => setPolicyBranchesDraft(e.target.value)}
-                      disabled={policy.mode !== "override"}
+                      disabled={policy.mode !== "override" || savingPolicy}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") savePolicy()
+                        if (e.key === "Enter" && !savingPolicy) savePolicy()
                       }}
                     />
                     <p className="ml-6 text-xs text-muted-foreground">
@@ -651,6 +735,7 @@ function RepoDetailPageContent({
                         name="branch-policy-mode"
                         checked={policy.mode === "disable"}
                         onChange={() => setPolicyMode("disable")}
+                        disabled={savingPolicy}
                         className="size-4 accent-primary"
                       />
                       Disable automatic reviews
