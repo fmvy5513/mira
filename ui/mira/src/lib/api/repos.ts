@@ -1,6 +1,7 @@
 import { deleteJson, fetchJson, postJson, putJson } from "./http"
 import type {
   BaseBranchPolicy,
+  BranchPolicyRecord,
   DependencyGraph,
   ExternalRefModel,
   FileModel,
@@ -10,6 +11,10 @@ import type {
   ReviewContextModel,
   ReviewEventModel,
 } from "./types"
+
+function platformQuery(platform?: string | null): string {
+  return platform ? `?platform=${encodeURIComponent(platform)}` : ""
+}
 
 // Repositories: detail, files, dependencies, indexing, reviews, and the
 // per-repo review-context entries.
@@ -113,19 +118,22 @@ export const reposApi = {
     deleteJson(`/api/repos/${owner}/${repo}/context/${id}`),
 
   // Per-repo auto-review destination-branch policy
-  getBranchPolicy: (owner: string, repo: string) =>
-    fetchJson<BaseBranchPolicy>(
-      `/api/repos/${owner}/${repo}/branch-policy`
+  // The same owner/repo can be registered on several platforms, each with
+  // its own policy; `platform` names the registry row to read or write.
+  getBranchPolicy: (owner: string, repo: string, platform?: string | null) =>
+    fetchJson<BranchPolicyRecord>(
+      `/api/repos/${owner}/${repo}/branch-policy${platformQuery(platform)}`
     ),
 
   saveBranchPolicy: (
     owner: string,
     repo: string,
     mode: BaseBranchPolicy["mode"],
-    branches: string[]
+    branches: string[],
+    platform?: string | null
   ) =>
-    putJson<BaseBranchPolicy>(
-      `/api/repos/${owner}/${repo}/branch-policy`,
+    putJson<BranchPolicyRecord>(
+      `/api/repos/${owner}/${repo}/branch-policy${platformQuery(platform)}`,
       { mode, branches }
     ),
 }

@@ -27,10 +27,12 @@ from mira.dashboard.api import (
     PackageVersionModel,
     PackageVersionSourceModel,
     RepoBaseBranchPolicy,
+    RepoBranchPolicyResponse,
     RepoDetail,
     RepoListItem,
     ReviewEventModel,
     SymbolModel,
+    _decode_storage_owner,
     _open_relationships,
     _open_store,
     _pick_platform_record,
@@ -677,25 +679,65 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
         return [_queries.review_event_model(e) for e in store.list_review_events(limit=limit)]
 
 
-@router.get("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
-def get_branch_policy(owner: str, repo: str) -> RepoBaseBranchPolicy:
+def _branch_policy_records(
+    owner: str, repo: str, platform: str | None
+) -> tuple[RepoRecord | None, list[RepoRecord]]:
+    """Resolve the registry record a branch-policy request names.
+
+    Returns ``(record, all records for the slug)``. An explicit ``platform``
+    (or a platform-prefixed storage owner) selects exactly that row; without
+    one the highest-priority platform is used, as everywhere else.
+    """
+    registry_owner, encoded_platform = _decode_storage_owner(owner)
+    if platform and encoded_platform and platform != encoded_platform:
+        raise HTTPException(status_code=400, detail="Platform does not match the repository path")
+    records = _api._app_db.get_repo_any_platform(registry_owner, repo)
+    wanted = platform or encoded_platform
+    if wanted:
+        return next((r for r in records if r.platform == wanted), None), records
+    return (_pick_platform_record(records) if records else None), records
+
+
+def _sorted_platforms(records: list[RepoRecord]) -> list[str]:
+    return sorted({r.platform for r in records}, key=lambda p: (_api._PLATFORM_ORDER.get(p, 99), p))
+
+
+@router.get("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBranchPolicyResponse)
+def get_branch_policy(
+    owner: str, repo: str, platform: str | None = None
+) -> RepoBranchPolicyResponse:
     """The stored per-repo auto-review branch policy (admin UI backing)."""
-    records = _api._app_db.get_repo_any_platform(owner, repo)
-    record = _pick_platform_record(records) if records else None
-    return _parse_base_branch_policy(record.base_branch_policy if record else "") or (
+    record, records = _branch_policy_records(owner, repo, platform)
+    if platform and record is None:
+        raise HTTPException(status_code=404, detail="Repository not registered on this platform")
+    stored = _parse_base_branch_policy(record.base_branch_policy if record else "") or (
         RepoBaseBranchPolicy(mode="inherit")
+    )
+    return RepoBranchPolicyResponse(
+        mode=stored.mode,
+        branches=stored.branches,
+        platform=record.platform if record else None,
+        platforms=_sorted_platforms(records),
     )
 
 
-@router.put("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
+@router.put("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBranchPolicyResponse)
 def set_branch_policy(
-    owner: str, repo: str, body: RepoBaseBranchPolicy, request: Request
-) -> RepoBaseBranchPolicy:
+    owner: str,
+    repo: str,
+    body: RepoBaseBranchPolicy,
+    request: Request,
+    platform: str | None = None,
+) -> RepoBranchPolicyResponse:
     """Store the per-repo auto-review branch policy.
 
     ``override`` requires at least one branch pattern (an empty override would
     silently disable reviews, which is what ``disable`` is for). Takes effect
     on the next webhook event; no restart needed.
+
+    When the slug is registered on more than one platform the request must
+    name the platform (``?platform=``); an ambiguous write is refused rather
+    than applied to whichever platform sorts first.
     """
     _require_admin(request)
     from mira.platforms.base_branch_policy import validate_patterns
@@ -713,16 +755,28 @@ def set_branch_policy(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    records = _api._app_db.get_repo_any_platform(owner, repo)
-    record = _pick_platform_record(records) if records else None
+    record, records = _branch_policy_records(owner, repo, platform)
+    _, encoded_platform = _decode_storage_owner(owner)
     if record is None:
         raise HTTPException(
             status_code=404, detail="Repository not registered with this Mira instance"
         )
+    if not (platform or encoded_platform) and len({r.platform for r in records}) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Repository is registered on several platforms; choose one",
+        )
     # Only override uses branches; don't persist stale values for inherit/disable.
     blob = json.dumps({"mode": body.mode, "branches": branches})
-    _api._app_db.set_repo_base_branch_policy(owner, repo, blob, platform=record.platform)
-    return RepoBaseBranchPolicy(mode=body.mode, branches=branches)
+    _api._app_db.set_repo_base_branch_policy(
+        record.owner, record.repo, blob, platform=record.platform
+    )
+    return RepoBranchPolicyResponse(
+        mode=body.mode,
+        branches=branches,
+        platform=record.platform,
+        platforms=_sorted_platforms(records),
+    )
 
 
 # Keep the catch-all detail route last.  For nested GitLab namespaces it can
