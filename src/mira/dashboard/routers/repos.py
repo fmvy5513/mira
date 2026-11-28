@@ -192,11 +192,16 @@ def get_dependencies(owner: str, repo: str) -> DependencyGraph:
 
 
 def _is_known_public(full_name: str) -> bool:
-    """True only when the registry records ``owner/repo`` as public; unknown
-    visibility counts as private, as it does everywhere else."""
+    """True only when every registry record named ``owner/repo`` is public.
+
+    Relationship edges are keyed by registry ``owner/repo`` with no platform,
+    so a name shared by two platforms' records cannot say which one an edge
+    belongs to. Such a name counts as public only if all of them are; unknown
+    visibility counts as private, as it does everywhere else.
+    """
     owner, _, repo = full_name.rpartition("/")
     records = _api._app_db.get_repo_any_platform(owner, repo)
-    return bool(records) and _pick_platform_record(records).private is False
+    return bool(records) and all(r.private is False for r in records)
 
 
 @router.get("/api/repos/{owner:path}/{repo}/blast-radius.svg")
@@ -249,15 +254,20 @@ def get_blast_radius_svg(owner: str, repo: str, request: Request) -> FastAPIResp
     internal_files = [f for f, _ in file_scores[3:9]]
 
     # Get cross-repo deps
+    # Edges are keyed by the registry name of the record authorized above,
+    # not the raw URL owner (which may carry a storage prefix).
+    target_name = f"{record.owner}/{record.repo}"
     cross_repo: list[str] = []
-    try:
-        with _open_relationships() as rs:
-            full_name = f"{owner}/{repo}"
-            for edge in rs.resolve_edges():
-                if edge.target_repo == full_name:
-                    cross_repo.append(edge.source_repo)
-    except Exception:
-        pass
+    # Anonymously, only when that name identifies public records alone: an edge
+    # cannot say which platform's record it targets.
+    if signed_in or _is_known_public(target_name):
+        try:
+            with _open_relationships() as rs:
+                for edge in rs.resolve_edges():
+                    if edge.target_repo == target_name:
+                        cross_repo.append(edge.source_repo)
+        except Exception:
+            pass
     if not signed_in:
         cross_repo = [name for name in cross_repo if _is_known_public(name)]
 
