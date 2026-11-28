@@ -1024,8 +1024,12 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
+        # A retargeted PR may keep its head SHA; its diff against the new base
+        # has not been reviewed, so it is never narrowed to "new commits".
+        force_full_diff = getattr(self, "_force_full_diff", False) is True
         if (
             review_round >= 2
+            and not force_full_diff
             and pr_info.head_sha
             and self.provider.requires_full_delivery_review(pr_info) is not True
         ):

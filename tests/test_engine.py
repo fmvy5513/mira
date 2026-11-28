@@ -2069,6 +2069,44 @@ class TestIncrementalDiff:
         assert captured["diff_text"] == "INCR"
 
     @pytest.mark.asyncio
+    async def test_retargeted_pr_reviews_the_full_diff(self, monkeypatch):
+        """A PR moved to a new base is reviewed on its whole diff against that
+        base, not narrowed to the commits since the last reviewed head."""
+        from mira.core.engine import ReviewEngine
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        engine._force_full_diff = True
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        mock_provider.get_compare_diff.assert_not_called()
+        assert captured["diff_text"] == "FULL"
+
+    @pytest.mark.asyncio
     async def test_round_2_falls_back_to_full_diff_when_no_sha(self, monkeypatch):
         """Missing last_reviewed_sha → no incremental fetch, full diff used.
         Backward compat for PRs that existed before the feature shipped."""

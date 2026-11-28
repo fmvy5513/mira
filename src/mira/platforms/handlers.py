@@ -106,12 +106,14 @@ async def run_pr_review(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
+    full_diff: bool = False,
 ) -> None:
     """Platform-neutral review core: review a PR/MR and post the result.
 
     Shared by the GitHub and GitLab webhook handlers — everything here goes
     through the ``provider`` abstraction and the engine, so it's the same for
-    every platform.
+    every platform. ``full_diff`` skips the round-2 narrowing to the commits
+    since the last reviewed head (used when the PR's base branch changed).
     """
     repo_full = f"{owner}/{repo}"
 
@@ -135,6 +137,8 @@ async def run_pr_review(
         indexing_llm=indexing_llm,
         security_llm=security_llm,
     )
+    if full_diff:
+        engine._force_full_diff = True  # type: ignore[attr-defined]
 
     from mira.dashboard.api import _app_db
 
