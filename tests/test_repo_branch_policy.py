@@ -212,3 +212,57 @@ class TestEndpoints:
         with pytest.raises(HTTPException) as exc:
             set_branch_policy("ghost", "repo", body, _admin_request())  # noqa: SLF001
         assert exc.value.status_code == 404
+
+
+class TestSameSlugOnTwoPlatforms:
+    """One owner/repo registered on GitHub and GitLab has two policies."""
+
+    @pytest.fixture
+    def two(self, db: AppDatabase, monkeypatch):
+        db.register_repo("o", "r", platform="github")
+        db.register_repo("o", "r", platform="gitlab")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        return db
+
+    def test_get_names_platform_and_all_platforms(self, two: AppDatabase):
+        policy = get_branch_policy("o", "r")
+        assert policy.platform == "github"
+        assert policy.platforms == ["github", "gitlab"]
+        assert get_branch_policy("o", "r", platform="gitlab").platform == "gitlab"
+
+    def test_put_without_platform_is_refused(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        with pytest.raises(HTTPException) as exc:
+            set_branch_policy("o", "r", body, _admin_request())
+        assert exc.value.status_code == 409
+        assert two.get_repo("o", "r", platform="github").base_branch_policy == ""
+        assert two.get_repo("o", "r", platform="gitlab").base_branch_policy == ""
+
+    def test_put_edits_only_the_named_platform(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        saved = set_branch_policy("o", "r", body, _admin_request(), platform="gitlab")
+        assert saved.platform == "gitlab"
+        assert get_branch_policy("o", "r", platform="gitlab").mode == "disable"
+        assert get_branch_policy("o", "r", platform="github").mode == "inherit"
+
+        body = SimpleNamespace(mode="override", branches=["main"])
+        set_branch_policy("o", "r", body, _admin_request(), platform="github")
+        assert get_branch_policy("o", "r", platform="github").mode == "override"
+        assert get_branch_policy("o", "r", platform="gitlab").mode == "disable"
+
+    def test_unregistered_platform_404s(self, two: AppDatabase):
+        body = SimpleNamespace(mode="disable", branches=[])
+        with pytest.raises(HTTPException) as exc:
+            set_branch_policy("o", "r", body, _admin_request(), platform="forgejo")
+        assert exc.value.status_code == 404
+        with pytest.raises(HTTPException) as exc:
+            get_branch_policy("o", "r", platform="forgejo")
+        assert exc.value.status_code == 404
+
+    def test_single_platform_put_needs_no_platform(self, db: AppDatabase, monkeypatch):
+        db.register_repo("g", "r", platform="gitlab")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        body = SimpleNamespace(mode="disable", branches=[])
+        saved = set_branch_policy("g", "r", body, _admin_request())
+        assert saved.platform == "gitlab"
+        assert get_branch_policy("g", "r").mode == "disable"
