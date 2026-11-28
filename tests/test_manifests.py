@@ -535,28 +535,102 @@ class TestPreferResolved:
         selected = _prefer_resolved(rows)
         assert [(r["version"], r["file_path"]) for r in selected] == [("2.3.4", "web/package.json")]
 
-    def test_workspace_root_lockfile_covers_nested_manifest(self):
+    @staticmethod
+    def _npm_row(version, path, eligible=True):
+        return {
+            "owner": "o",
+            "repo": "r",
+            "kind": "npm",
+            "name": "shared",
+            "version": version,
+            "file_path": path,
+            "scan_eligible": eligible,
+        }
+
+    @pytest.mark.parametrize("reversed_rows", [False, True])
+    def test_root_lockfile_does_not_suppress_independent_nested_exact_pin(self, reversed_rows):
+        from mira.security.poller import _prefer_resolved
+
+        # The inventory does not record workspace membership, so a root
+        # lockfile cannot show that it covers a nested project.
+        rows = [
+            self._npm_row("1.0.0", "package-lock.json"),
+            self._npm_row("2.3.4", "examples/demo/package.json"),
+        ]
+        if reversed_rows:
+            rows.reverse()
+        selected = _prefer_resolved(rows)
+        assert sorted((r["version"], r["file_path"]) for r in selected) == [
+            ("1.0.0", "package-lock.json"),
+            ("2.3.4", "examples/demo/package.json"),
+        ]
+
+    def test_same_directory_lockfile_supersedes_exact_pin(self):
         from mira.security.poller import _prefer_resolved
 
         rows = [
-            {
-                "owner": "o",
-                "repo": "r",
-                "kind": "npm",
-                "name": "shared",
-                "version": "1.0.0",
-                "file_path": "package-lock.json",
-            },
-            {
-                "owner": "o",
-                "repo": "r",
-                "kind": "npm",
-                "name": "shared",
-                "version": "1.2.0",
-                "file_path": "packages/ui/package.json",
-            },
+            self._npm_row("1.2.0", "web/package.json"),
+            self._npm_row("1.0.0", "web/package-lock.json"),
+        ]
+        assert [r["file_path"] for r in _prefer_resolved(rows)] == ["web/package-lock.json"]
+
+    def test_root_lockfile_still_supersedes_nested_constraint(self):
+        from mira.security.poller import _prefer_resolved
+
+        rows = [
+            self._npm_row("1.0.0", "package-lock.json"),
+            self._npm_row("^1.2.0", "packages/ui/package.json"),
         ]
         assert [r["file_path"] for r in _prefer_resolved(rows)] == ["package-lock.json"]
+
+    @pytest.mark.parametrize("reversed_rows", [False, True])
+    def test_distinct_exact_pins_without_lockfile_are_kept(self, reversed_rows):
+        from mira.security.poller import _prefer_resolved
+
+        rows = [
+            self._npm_row("1.0.0", "app/package.json"),
+            self._npm_row("2.3.4", "web/package.json"),
+        ]
+        if reversed_rows:
+            rows.reverse()
+        assert sorted(r["version"] for r in _prefer_resolved(rows)) == ["1.0.0", "2.3.4"]
+
+    @pytest.mark.parametrize("reversed_rows", [False, True])
+    def test_identical_exact_pins_without_lockfile_dedupe(self, reversed_rows):
+        from mira.security.poller import _prefer_resolved
+
+        rows = [
+            self._npm_row("1.0.0", "app/package.json"),
+            self._npm_row("=1.0.0", "web/package.json"),
+            self._npm_row("1.0.0", "tools/package.json"),
+        ]
+        if reversed_rows:
+            rows.reverse()
+        assert len(_prefer_resolved(rows)) == 1
+
+    @pytest.mark.parametrize("pin", ["=2.3.4", "= 2.3.4", " =2.3.4 "])
+    def test_equality_pin_is_exact_beside_unrelated_lockfile(self, pin):
+        from mira.security.poller import _prefer_resolved
+
+        rows = [
+            self._npm_row("1.0.0", "app/package-lock.json"),
+            self._npm_row(pin, "web/package.json"),
+        ]
+        assert sorted(r["file_path"] for r in _prefer_resolved(rows)) == [
+            "app/package-lock.json",
+            "web/package.json",
+        ]
+
+    @pytest.mark.parametrize("pin", ["^2.3.4", "~2.3.4", ">=2.3.4", "<2.3.4", "=^2.3.4"])
+    def test_range_pins_are_not_exact(self, pin):
+        from mira.security.poller import _npm_exact_version, _prefer_resolved
+
+        assert _npm_exact_version(pin) is None
+        rows = [
+            self._npm_row("1.0.0", "app/package-lock.json"),
+            self._npm_row(pin, "web/package.json"),
+        ]
+        assert [r["file_path"] for r in _prefer_resolved(rows)] == ["app/package-lock.json"]
 
     def test_other_ecosystems_still_select_one_resolved_version(self):
         from mira.security.poller import _prefer_resolved
