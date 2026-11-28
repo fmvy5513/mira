@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 
@@ -20,6 +21,20 @@ from mira.security.osv import (
     osv_ecosystem,
     query_batch,
 )
+
+_NPM_EQUALITY = re.compile(r"=\s*")
+
+
+def _npm_exact_version(version: str) -> str | None:
+    """Return the exact version an npm requirement pins, or ``None``.
+
+    A bare semver (``2.3.4``) or an equality pin (``=2.3.4``) is exact.
+    Ranges such as ``^``, ``~``, ``>=`` or ``<`` are not.
+    """
+    candidate = version.strip()
+    if candidate.startswith("="):
+        candidate = _NPM_EQUALITY.sub("", candidate, count=1)
+    return candidate if _NPM_VERSION.fullmatch(candidate) else None
 
 
 def _prefer_resolved(rows: list[dict]) -> list[dict]:
@@ -49,15 +64,19 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
         lock_dirs = locked_npm.get(identity(row))
         if not lock_dirs:
             return False
-        if not _NPM_VERSION.fullmatch(row.get("version", "")):
+        if _npm_exact_version(row.get("version", "")) is None:
             # A constraint like ``^1.0.0`` would match too broadly at OSV.
             # Any lockfile that resolves the package says more about it.
             return True
-        # An exact version is only superseded by a lockfile that covers this
-        # manifest: one in its own directory or an enclosing workspace root.
-        # A lockfile of an unrelated project in the same repo does not.
-        own = directory(row)
-        return any(not d or own == d or own.startswith(d + "/") for d in lock_dirs)
+        # An exact version is only superseded by a lockfile in its own
+        # directory. A lockfile in an ancestor directory may belong to an
+        # independent project, and the inventory does not record workspace
+        # membership, so the exact pin is kept.
+        return directory(row) in lock_dirs
+
+    def npm_version(row: dict) -> str:
+        version = row.get("version", "")
+        return _npm_exact_version(version) or version
 
     by_key: dict[tuple[str, str, str, str], list[dict]] = {}
     for r in rows:
@@ -75,11 +94,11 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
             by_key[key] = [r]
             continue
         if r["kind"] == "npm":
-            # Keep every distinct exact version; OSV queries are deduplicated
-            # by (package, version) later, after this per-repo selection.
-            if (lockfile_row or key in locked_npm) and all(
-                prior["version"] != r["version"] for prior in existing
-            ):
+            # Keep every distinct exact version, with or without a lockfile;
+            # OSV queries are deduplicated by (package, version) later, after
+            # this per-repo selection. A second constraint row is still dropped.
+            exact = lockfile_row or _npm_exact_version(r.get("version", "")) is not None
+            if exact and all(npm_version(prior) != npm_version(r) for prior in existing):
                 existing.append(r)
             continue
         # Prefer the row coming from a lockfile path. If both or neither are

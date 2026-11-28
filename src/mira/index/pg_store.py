@@ -1667,21 +1667,22 @@ class PgIndexStore(_StoreSharedMixin):
             (self._owner, self._repo, category, path_pattern),
         )
         if existing:
-            # Preserve the existing approval status across re-synthesis.
-            if existing[1] == "rejected":
-                # An admin rejected this rule: leave their decision, and the
-                # text they rejected, untouched rather than re-describing it
-                # under the same verdict.
-                rejected = self.get_learned_rule(existing[0])
-                if rejected is not None:
-                    return rejected
+            # Preserve the existing approval status across re-synthesis. An
+            # admin rejection leaves their decision, and the text they
+            # rejected, untouched. The guard is in the UPDATE itself, so a
+            # rejection recorded after the read above still wins.
             with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
-                    "sample_count=%s, updated_at=%s WHERE id=%s",
+                    "sample_count=%s, updated_at=%s WHERE id=%s AND status <> 'rejected'",
                     (rule_text, source_signal, sample_count, now, existing[0]),
                 )
+                updated = cur.rowcount
             self._commit()
+            if updated == 0:
+                current = self.get_learned_rule(existing[0])
+                if current is not None:
+                    return current
             return LearnedRuleRow(
                 id=existing[0],
                 rule_text=rule_text,

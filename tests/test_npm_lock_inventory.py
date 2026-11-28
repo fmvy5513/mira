@@ -422,3 +422,46 @@ def test_postgres_waiting_replacement_sees_committed_rows(postgres_url, monkeypa
             writer.result(timeout=5)
     (row,) = store.list_manifest_packages()
     assert row.version in {"1.0.0", "2.0.0"}
+
+
+def _prod_and_dev_copies(dev_first):
+    rows = [
+        {
+            "name": "shared",
+            "kind": "npm",
+            "version": "1.0.0",
+            "file_path": "package-lock.json",
+            "is_dev": is_dev,
+        }
+        for is_dev in (False, True)
+    ]
+    return rows[::-1] if dev_first else rows
+
+
+@pytest.mark.parametrize("dev_first", [False, True])
+def test_sqlite_keeps_prod_flag_when_same_npm_version_also_dev(dev_first):
+    store = IndexStore(":memory:")
+    try:
+        store.replace_manifest_packages("package-lock.json", _prod_and_dev_copies(dev_first))
+        (row,) = store.list_manifest_packages()
+        assert (row.version, row.is_dev) == ("1.0.0", False)
+        store.replace_manifest_packages(
+            "package-lock.json", [{**r, "is_dev": True} for r in _prod_and_dev_copies(dev_first)]
+        )
+        (row,) = store.list_manifest_packages()
+        assert row.is_dev
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("dev_first", [False, True])
+def test_postgres_keeps_prod_flag_when_same_npm_version_also_dev(postgres_url, dev_first):
+    store = PgIndexStore("example", "app", postgres_url)
+    store.replace_manifest_packages("package-lock.json", _prod_and_dev_copies(dev_first))
+    (row,) = store.list_manifest_packages()
+    assert (row.version, row.is_dev) == ("1.0.0", False)
+    store.replace_manifest_packages(
+        "package-lock.json", [{**r, "is_dev": True} for r in _prod_and_dev_copies(dev_first)]
+    )
+    (row,) = store.list_manifest_packages()
+    assert row.is_dev
