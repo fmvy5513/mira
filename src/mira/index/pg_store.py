@@ -335,6 +335,9 @@ def _migrate_manifest_package_version_identity(url: str) -> None:
                 "ALTER TABLE package_manifests ADD COLUMN IF NOT EXISTS "
                 "scan_eligible INTEGER NOT NULL DEFAULT 1"
             )
+            # Releases before this one upsert against this constraint and fail on
+            # every manifest write without it. Before rolling back, stop these
+            # workers and run scripts/rollback_manifest_identity.sql.
             if legacy is not None:
                 cur.execute(
                     sql.SQL("ALTER TABLE package_manifests DROP CONSTRAINT {}").format(
