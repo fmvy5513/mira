@@ -35,6 +35,7 @@ from mira.dashboard.api import (
     _open_store,
     _pick_platform_record,
     _require_admin,
+    _resolve_repo_record,
     logger,
     router,
 )
@@ -211,12 +212,10 @@ def get_blast_radius_svg(owner: str, repo: str, request: Request) -> FastAPIResp
     """
     from mira.dashboard.blast_svg import generate_blast_svg
 
-    records = _api._app_db.get_repo_any_platform(owner, repo)
-    if not records:
-        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    # One record decides both who may see the badge and which index it reads.
+    record = _resolve_repo_record(owner, repo)
     signed_in = getattr(request.state, "user", None) is not None
-    reviewed_private = _pick_platform_record(records).private
-    if not signed_in and reviewed_private is not False:
+    if not signed_in and record.private is not False:
         svg = generate_blast_svg([], [], [], caption="Private repository — sign in to view")
         return FastAPIResponse(
             content=svg,
@@ -227,7 +226,7 @@ def get_blast_radius_svg(owner: str, repo: str, request: Request) -> FastAPIResp
     # Rank files by how many other files depend on them
     file_scores: list[tuple[str, int]] = []
     try:
-        with _open_store(owner, repo) as store:
+        with _open_store(owner, repo, record=record) as store:
             all_paths = sorted(store.all_paths())
             for path in all_paths:
                 summary_obj = store.get_summary(path)

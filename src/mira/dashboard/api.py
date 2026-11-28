@@ -88,25 +88,39 @@ def _pick_platform_record(records: list[RepoRecord]) -> RepoRecord:
     return min(records, key=lambda r: _PLATFORM_ORDER.get(r.platform, 99))
 
 
-@contextmanager
-def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
-    """Open an IndexStore via the factory (Postgres or SQLite).
+def _resolve_repo_record(owner: str, repo: str) -> RepoRecord:
+    """Resolve a dashboard ``owner/repo`` to the one registry record it names.
 
-    The dashboard routes are keyed by (owner, repo) only, so resolve the
-    platform from the registry with a single cross-platform lookup.
+    A platform-prefixed owner (``_gitlab/acme``) names that platform's record;
+    a plain owner takes the highest-priority platform. Every caller that both
+    authorizes on a record and then reads its index must use the same record,
+    so a GitLab namespace that happens to look like a storage prefix cannot
+    pass a visibility check on one repo and open another's index.
     """
     registry_owner, encoded_platform = _decode_storage_owner(owner)
     if encoded_platform:
         repo_record = _app_db.get_repo(registry_owner, repo, platform=encoded_platform)
         if not repo_record:
             raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
-    else:
-        repo_records = _app_db.get_repo_any_platform(registry_owner, repo)
-        if not repo_records:
-            raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
-        repo_record = _pick_platform_record(repo_records)
+        return repo_record
+    repo_records = _app_db.get_repo_any_platform(registry_owner, repo)
+    if not repo_records:
+        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    return _pick_platform_record(repo_records)
 
-    store = IndexStore.open(registry_owner, repo, platform=repo_record.platform)
+
+@contextmanager
+def _open_store(
+    owner: str, repo: str, *, record: RepoRecord | None = None
+) -> Generator[IndexStore, None, None]:
+    """Open an IndexStore via the factory (Postgres or SQLite).
+
+    The dashboard routes are keyed by (owner, repo) only, so resolve the
+    platform from the registry, or use ``record`` when the caller already
+    resolved (and authorized against) it.
+    """
+    repo_record = record if record is not None else _resolve_repo_record(owner, repo)
+    store = IndexStore.open(repo_record.owner, repo_record.repo, platform=repo_record.platform)
     try:
         yield store
     finally:

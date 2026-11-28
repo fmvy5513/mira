@@ -50,10 +50,16 @@ class _Relationships:
         ]
 
 
+opened: list = []
+
+
 @pytest.fixture(autouse=True)
 def _stub_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened.clear()
+
     @contextmanager
-    def open_store(owner: str, repo: str):
+    def open_store(owner: str, repo: str, *, record=None):  # noqa: ANN001
+        opened.append(record)
         yield _Store()
 
     @contextmanager
@@ -115,3 +121,25 @@ def test_unknown_repo_is_404_for_everyone(db: AppDatabase) -> None:
     with pytest.raises(HTTPException) as exc:
         repos.get_blast_radius_svg("acme", "ghost", _request())
     assert exc.value.status_code == 404
+
+
+def test_prefix_shaped_gitlab_namespace_cannot_open_a_private_repo(db: AppDatabase) -> None:
+    # A public GitLab group whose path looks like a storage prefix, beside a
+    # private Forgejo repo that the prefix would decode to.
+    db.register_repo("_forgejo/acme", "web", installation_id=1, platform="gitlab")
+    db.set_repo_visibility("_forgejo/acme", "web", False, platform="gitlab")
+    db.register_repo("acme", "web", installation_id=1, platform="forgejo")
+    db.set_repo_visibility("acme", "web", True, platform="forgejo")
+
+    svg, _ = _badge("_forgejo/acme", "web")
+
+    # Visibility is judged on the record whose index would be read.
+    assert "core.py" not in svg
+    assert "Private repository" in svg
+    assert opened == []
+
+
+def test_badge_reads_the_index_of_the_record_it_authorized(db: AppDatabase) -> None:
+    db.set_repo_visibility("acme", "web", False)
+    _badge("acme", "web")
+    assert [(r.owner, r.repo, r.platform) for r in opened] == [("acme", "web", "github")]
