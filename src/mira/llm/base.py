@@ -133,19 +133,56 @@ BUDGET_RETRY_TOKENS = 16384
 BUDGET_FLOOR_TOKENS = 4096
 
 
-def _budget_from_error(error_text: str, body: dict, current: int) -> int | None:
-    """The output budget a rejection names: its largest number below the one sent.
+# Tokens kept spare when the output budget is computed from a context window,
+# so a count that differs by a few tokens on the endpoint's side still fits.
+CONTEXT_MARGIN_TOKENS = 64
 
-    "supports at most 8192 completion tokens" gives 8192. A context-window error
-    names the whole window, so the prompt's share (estimated high) is taken off.
-    Returns None when nothing usable at or above the floor is found.
+_CONTEXT_WINDOW_RE = re.compile(
+    r"context(?:[ -](?:length|window|size|limit))[^\d.]{0,40}?(\d+)"
+    r"|(\d+)[ -]tokens?[ -]context"
+)
+_INPUT_BEFORE_LABEL_RE = re.compile(
+    r"(\d+)\s+(?:tokens?\s+)?(?:of\s+)?(?:text\s+|prompt\s+)?(?:input|prompt)\b"
+)
+_INPUT_AFTER_LABEL_RE = re.compile(
+    r"\b(?:input|prompt)(?:\s+tokens?)?(?:\s+(?:is|has|was|of|count))?[\s:=]+(\d+)"
+)
+
+
+def _context_window_budget(text: str, body: dict) -> int | None:
+    """The output room a context-window rejection leaves THIS request, if labelled.
+
+    The window is the whole context (input plus output), so the input the error
+    reports is taken off it; when it reports none, the prompt's share is
+    estimated high from the body. Returns None when no labelled window is found.
     """
-    numbers = [int(n) for n in re.findall(r"\b\d+\b", error_text.replace(",", ""))]
-    limit = max((n for n in numbers if n < current), default=0)
-    text = error_text.lower()
-    if "context" in text or "input" in text:
-        limit -= len(json.dumps(body)) // 3
-    return limit if limit >= BUDGET_FLOOR_TOKENS else None
+    window_match = _CONTEXT_WINDOW_RE.search(text)
+    if window_match is None:
+        return None
+    window = int(window_match.group(1) or window_match.group(2))
+    input_match = _INPUT_BEFORE_LABEL_RE.search(text) or _INPUT_AFTER_LABEL_RE.search(text)
+    used = int(input_match.group(1)) if input_match else len(json.dumps(body)) // 3
+    return window - used - CONTEXT_MARGIN_TOKENS
+
+
+def _budget_from_error(error_text: str, body: dict, current: int) -> tuple[int | None, bool]:
+    """The output budget a rejection names, and whether it is a model-wide limit.
+
+    "supports at most 8192 completion tokens" gives ``(8192, True)``: the
+    model's output limit, remembered for later requests. A context-window error
+    ("maximum context length is 131072 … 100 of text input") gives the room
+    left after this request's input, ``(130908, False)``: it holds only for
+    this prompt, so a later short prompt must not inherit it. Any positive
+    limit is honoured, also one below the floor. Returns ``(None, …)`` when
+    nothing usable is found.
+    """
+    text = error_text.replace(",", "").lower()
+    remaining = _context_window_budget(text, body)
+    if remaining is not None:
+        return (remaining if 0 < remaining < current else None), False
+    numbers = [int(n) for n in re.findall(r"\b\d+\b", text)]
+    limit = max((n for n in numbers if 0 < n < current), default=0)
+    return (limit or None), True
 
 
 def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
@@ -300,31 +337,48 @@ class OpenAICompatibleProvider:
         Endpoints word it differently ("max_tokens is too large", "maximum
         context length", "output tokens"), so match loosely but only when the
         request actually carried more than the new budget. The new budget is
-        the limit the error names; when it names none, or that limit was
-        already rejected, the floor. Returns True when the body was changed
-        and the request should be sent again.
+        the limit the error names, also one below the floor; when it names
+        none, or that limit was already rejected, the floor. Only an output
+        limit is remembered for the model: a context-window shortfall belongs
+        to this prompt alone. Returns True when the body was changed and the
+        request should be sent again.
         """
         text = error_text.lower()
         if not any(
             marker in text
-            for marker in ("max_tokens", "max_completion_tokens", "context length", "output tokens")
+            for marker in (
+                "max_tokens",
+                "max_completion_tokens",
+                "context length",
+                "context window",
+                "output tokens",
+            )
         ):
             return False
         field = self._max_tokens_field()
         current = int(body.get(field) or 0)
         model = str(body.get("model"))
         # A limit already rejected is never below `current`, so it falls to the floor.
-        named = _budget_from_error(error_text, body, current)
-        target = named or BUDGET_FLOOR_TOKENS
+        named, model_wide = _budget_from_error(error_text, body, current)
+        target = named if named is not None else BUDGET_FLOOR_TOKENS
         if current <= target:
             return False
-        logger.warning(
-            "Endpoint rejected an output budget of %d for %s; retrying at %d and keeping it there",
-            current,
-            model,
-            target,
-        )
-        self._budget_caps[model] = target
+        if model_wide:
+            logger.warning(
+                "Endpoint rejected an output budget of %d for %s; retrying at %d and keeping it there",
+                current,
+                model,
+                target,
+            )
+            self._budget_caps[model] = target
+        else:
+            logger.warning(
+                "Request to %s did not fit the context window with an output budget of %d; "
+                "retrying this request at %d",
+                model,
+                current,
+                target,
+            )
         body[field] = target
         return True
 

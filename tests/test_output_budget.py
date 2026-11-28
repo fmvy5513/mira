@@ -217,3 +217,55 @@ async def test_cut_off_reply_is_not_retried_above_a_remembered_cap(provider):
     await llm.complete_with_tools([{"role": "user", "content": "review"}], [SUBMIT_REVIEW_TOOL])
 
     assert [r["max_tokens"] for r in requests] == [16384, 8192]
+
+
+@pytest.mark.asyncio
+async def test_named_limit_below_the_floor_is_honoured(provider):
+    """An endpoint that caps output at 2048 is retried at 2048, not at the floor."""
+
+    def serve(body, n):
+        if body["max_tokens"] > 2048:
+            message = (
+                f"max_tokens is too large: {body['max_tokens']}. "
+                "This model supports at most 2048 completion tokens."
+            )
+            return httpx.Response(400, json={"error": {"message": message}})
+        return httpx.Response(200, json=_tool_reply())
+
+    llm, requests = provider(serve, max_tokens=BUDGET_FLOOR_TOKENS)
+    messages = [{"role": "user", "content": "review"}]
+
+    await llm.complete_with_tools(messages, [SUBMIT_REVIEW_TOOL])
+    await llm.complete_with_tools(messages, [SUBMIT_REVIEW_TOOL])
+
+    assert [r["max_tokens"] for r in requests] == [BUDGET_FLOOR_TOKENS, 2048, 2048]
+
+
+@pytest.mark.asyncio
+async def test_context_window_shortfall_is_not_remembered_for_later_prompts(provider):
+    """A large prompt that ran out of context does not cap a later short one."""
+    window, big_input = 32768, 28000
+
+    def serve(body, n):
+        big = body["messages"][-1]["content"] == "big"
+        if big and body["max_tokens"] > window - big_input:
+            message = (
+                f"This endpoint's maximum context length is {window:,} tokens. However, you "
+                f"requested {big_input + body['max_tokens']:,} tokens ({big_input:,} of text "
+                f"input, {body['max_tokens']:,} in the output)."
+            )
+            return httpx.Response(400, json={"error": {"message": message}})
+        return httpx.Response(200, json=_tool_reply())
+
+    llm, requests = provider(serve, max_tokens=8192)
+
+    await llm.complete_with_tools([{"role": "user", "content": "big"}], [SUBMIT_REVIEW_TOOL])
+    await llm.complete_with_tools([{"role": "user", "content": "small"}], [SUBMIT_REVIEW_TOOL])
+
+    sent = [r["max_tokens"] for r in requests]
+    # The retry uses the room the window leaves this prompt (4,768 less a small margin),
+    # not the 4,096 floor, and the short prompt gets the configured budget back.
+    assert sent[0] == 8192
+    assert 4096 < sent[1] <= window - big_input
+    assert sent[2] == 8192
+    assert llm._budget_caps == {}
