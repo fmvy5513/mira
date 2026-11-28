@@ -16,6 +16,7 @@ from mira.index import pg_store
 from mira.index.indexer import IndexingRecoveryPending, index_diff, index_repo
 from mira.index.pg_store import PgIndexStore
 from mira.index.store import DirectorySummary, FileSummary, IndexingSuperseded, IndexStore
+from mira.platforms.fetch import EmptyRepoError
 
 
 @pytest.fixture
@@ -301,6 +302,34 @@ async def test_incomplete_recovery_keeps_next_push_on_full_scan(stores, missing)
     assert retry.tree_calls == 1
     assert observer.all_paths() == {"a.py", "b.py"}
     assert [p.version for p in observer.list_manifest_packages()] == ["2.0.0"]
+
+
+class EmptyFetcher(Fetcher):
+    async def repo_tree(self, *args):
+        self.tree_calls += 1
+        raise EmptyRepoError("example", "repo")
+
+
+async def test_empty_repository_stays_empty_on_a_second_attempt(stores):
+    _, new, observer = stores
+    for _ in range(2):
+        with pytest.raises(EmptyRepoError) as caught:
+            await _run(index_repo, new, EmptyFetcher({}), Model("NEW", []))
+        assert not isinstance(caught.value, IndexingRecoveryPending)
+    # Confirmed empty with nothing stored: no recovery left to run.
+    assert not observer.claim_index_run().needs_reconciliation
+
+
+async def test_empty_repository_keeps_stale_paths_pending(stores):
+    old, new, observer = stores
+    await _run(index_repo, old, Fetcher({"a.py": _code("OLD")}), Model("OLD", ["a.py"]))
+    for _ in range(2):
+        with pytest.raises(EmptyRepoError) as caught:
+            await _run(index_repo, new, EmptyFetcher({}), Model("NEW", []))
+        assert not isinstance(caught.value, IndexingRecoveryPending)
+    # Paths from the earlier index still need reconciling by a later run.
+    assert observer.all_paths() == {"a.py"}
+    assert observer.claim_index_run().needs_reconciliation
 
 
 @pytest.mark.parametrize("failure", ["unreadable", "error"])

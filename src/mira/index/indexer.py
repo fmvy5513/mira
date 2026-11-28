@@ -29,7 +29,7 @@ from mira.index.store import (
 )
 from mira.llm import create_llm
 from mira.llm.utils import strip_think_blocks
-from mira.platforms.fetch import RepoFetcher, make_fetcher
+from mira.platforms.fetch import EmptyRepoError, RepoFetcher, make_fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +376,15 @@ def _complete_index_run(store: IndexStore, run: IndexRun) -> Iterator[None]:
         # An error from a stale fetch must not be reported as the current run's
         # error. Check again before allowing its caller to handle the error.
         with store.index_write(run):
-            pass
+            stored_paths = bool(store.all_paths()) if isinstance(exc, EmptyRepoError) else True
+        if isinstance(exc, EmptyRepoError):
+            # A confirmed empty repository is a terminal outcome, never a
+            # recovery still in progress. With nothing stored there is nothing
+            # left to reconcile, so the pending marker is cleared; paths kept
+            # from an earlier index stay pending until a later run reconciles them.
+            if not stored_paths:
+                store.finish_index_run(run)
+            raise
         if run.needs_reconciliation and not isinstance(
             exc, (IndexingCancelled, IndexingRecoveryPending)
         ):
